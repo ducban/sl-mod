@@ -1,0 +1,6 @@
+{
+  "name": "sl-mod",
+  "version": "0.1.0",
+  "description": "A lighter status line drawn in the band above the prompt",
+  "author": { "name": "ducban", "email": "nguyen@ducban.com" }
+}

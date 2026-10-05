@@ -1,0 +1,3 @@
+# The engine writes these for the editor when it loads the mod.
+.claude-plugin/types/
+node_modules/
