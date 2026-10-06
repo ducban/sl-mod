@@ -204,10 +204,11 @@ An earlier attempt put a `CLAUDE_CODE_PLUGIN_DIRS` export in the shell's
 is three path strings across this box, the Mac and the VPS, three things to go
 stale, and the point of the mod was to stop depending on local wiring.
 
-**The repo is private.** `marketplace add` clones over HTTPS through the `gh`
-credential helper, so each machine needs its own `gh auth login` first — and the
-VPS is headless, so that is a device flow or a token there. Making the repo
-public would drop that step; it has not been decided.
+The repo is **public**, so `marketplace add` clones over plain HTTPS and no
+machine needs GitHub auth for it — checked, not assumed: a clone with the
+credential helper and the global git config both switched off succeeds. That
+matters most for the VPS, which is headless and would otherwise need a device
+flow or a token.
 
 ## Develop
 
