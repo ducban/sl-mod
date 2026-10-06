@@ -165,9 +165,9 @@ table in this file, and a price table in a file is a number that goes wrong
 silently the day the prices change. So `i` and `o` are token counts and `$` is
 the session total.
 
-The lifetime figures (`$470.66`, `587.4M tokens`) are out of reach entirely:
-they need either the transcript scan this mod exists to avoid, or `ccuc`, which
-is not on every machine.
+A lifetime total -- spend and tokens across every session, not just this one --
+is out of reach entirely. It needs either the transcript scan this mod exists to
+avoid, or `ccuc`, which is not on every machine.
 
 ### version
 
