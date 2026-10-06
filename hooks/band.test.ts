@@ -117,56 +117,45 @@ test('the band draws on every surface, not just the terminal', async ($, on) => 
   }
 })
 
-test('the controls draw under the prompt, on every surface', async ($, on) => {
+test('effort is picked outright, so the band cannot report a level nobody set', async ($, on) => {
   stand(on)
 
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'sl-mod', surface, ...HINT })
-
-    expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeDefined()
-    for (const key of ['effort-up', 'effort-down']) {
-      expect(await ui.find({ key })).toBeDefined()
-    }
-
-    await ui.unmount()
-  }
-})
-
-test('while a turn runs the engine keeps its own hint line', async ($, on) => {
-  stand(on)
-
-  // `esc to interrupt` lives in that line and is worth more than two buttons.
-  // A tree here replaces the line rather than adding to it, so the only way to
-  // leave it alone is not to draw.
-  const ui = await $.ui.mount({
-    plugin: 'sl-mod',
-    surface: 'terminal',
-    component: 'PromptHint',
-    props: { ...HINT.props, isWorking: true, hint: 'esc to interrupt' },
-  })
-
-  expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeUndefined()
-
-  await ui.unmount()
-})
-
-test('rotating effort marks the row, so the band shows what will be sent', async ($, on) => {
-  stand(on)
-
-  // No turn has run, so `turn.step` has never reported an effort and the model
-  // cell carries none: a level is drawn only once there is one to draw.
+  // No turn has run and no classic hook has fired, so nothing has reported an
+  // effort and the model cell carries none.
   const band = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
   expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeUndefined()
 
-  // The button that moves it is under the prompt now, and the band has to
-  // redraw off a press that landed on another render site entirely.
-  const hint = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...HINT })
-  await hint.press({ key: 'effort-up' })
+  // The choices run session, low, medium, high, xhigh, max. Two presses from
+  // `session` land on medium -- NOT on high, which is where a relative nudge
+  // landed when it guessed `medium` for a baseline it had never been told.
+  const pane = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...SETTINGS })
+  await pane.press({ key: 'item-effort' })
+  await pane.press({ key: 'item-effort' })
 
-  expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /\(M\)/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /\(H\)/ })).toBeUndefined()
 
-  await hint.unmount()
+  // And round the end of the list is `session` again: no opinion, nothing drawn.
+  for (let i = 0; i < 4; i += 1) await pane.press({ key: 'item-effort' })
+  expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeUndefined()
+
+  await pane.unmount()
   await band.unmount()
+})
+
+test('a classic hook reports the effort turn.step never carried', async ($, on) => {
+  stand(on)
+  // turn.step's `effort` is absent for a request that names none, which is what
+  // this session does, so the cell stayed blank until someone pressed a key.
+  // The classic hooks carry `effort.level` after any silent downgrade.
+  on('classic.Stop', () => ({}))
+
+  await $.classic.Stop({ effort: { level: 'medium' }, stop_hook_active: false })
+
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /\(M\)/ })).toBeDefined()
+
+  await ui.unmount()
 })
 
 test('the band stands aside for a survey', async ($, on) => {

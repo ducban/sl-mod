@@ -17,15 +17,13 @@ it. The two lines move; they do not stay where `statusLine` put them.
 ## What it shows
 
 ```
-  arch     Opus 5 ▮▮▮▯▯ (H)    main ✓   ⌂ 0.1.0
+  arch     Opus 5 ▮▮▯▯▯ (M)    main ✓   ⌂ 0.1.0
  ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
-
- > │
-   effort: [▲] [▼]
 ```
 
 Up to four lines, and what sits on which is set in `/sl-settings`. The default
-is identity on line one, budget on line two, and the controls under the prompt.
+is identity on line one and budget on line two. Nothing is drawn under the
+prompt: the engine keeps its own hint line.
 Each bar is five segments of 20%, rounded **up**, so 19% shows one segment
 rather than none — a quota must never read lower than it is.
 
@@ -47,38 +45,58 @@ number.
 ## State
 
 Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
-`/sl-effort` and `/sl-debug` work. Twelve tests pass under `claude plugin test`,
+`/sl-effort` and `/sl-debug` work. Eleven tests pass under `claude plugin test`,
 `tsc -p .` is clean and `claude plugin validate` passes.
 
-## The hint line is one row
+## The hint line, and why nothing is drawn there now
 
-Tried and failed: a `flexDirection: 'column'` tree at `PromptHint` does **not**
-give two rows. A tree carrying both the controls and the engine's own `hint`
-string came out as one wrapped line with the engine's text broken across it:
+Two things were tried and neither worked.
+
+A `flexDirection: 'column'` tree at `PromptHint` does **not** give two rows. A
+tree carrying both the controls and the engine's own `hint` string came out as
+one wrapped line with the engine's text broken across it:
 
 ```
 ⏵⏵ auto mode on · effort: [ ▲ ] [ ▼ ] · [ help ]
                     (shift+tab to cycle)
 ```
 
-So the controls are drawn alone, and only while the session is idle. While a
-turn runs the hook passes and the engine keeps its line, because `esc to
-interrupt` is worth more than two buttons.
+And `4`, `5` and `0` never fired there — measured, not assumed. The types say a
+bare digit from an empty composer presses a band Button and only a band Button,
+and that is what happens.
 
-`4`, `5` and `0` **do not fire** there either — measured, not assumed. The types
-say a bare digit from an empty composer presses a band Button and only a band
-Button, and that is what happens. The hotkeys stay registered in case the site
-is ever focusable, and they are not drawn: advertising a key that does nothing
-is worse than no key. The buttons are clicked, `/sl-settings` and `/sl-help`
-open as two tabs of one pane, and `/sl-effort <level>` sets the level outright.
+So the site is left alone. The controls live in `/sl-settings` instead, where a
+pane holds the keyboard and a Button's hotkey works.
 
-If a genuine second row under the prompt is wanted, the only site that gives one
-is the band itself — which puts it above the prompt, not below.
+## Effort is picked, never nudged
+
+A relative control needs a baseline, and the baseline was a guess. `turn.step`
+carries `effort` only where the request names one — *"the session's setting or
+the model's default, absent for a model without effort"* — and in this session it
+never did. So one press of "more" from an unknown start computed `medium + 1`
+and drew `(H)` for a session that was not on high.
+
+Two fixes, and both were needed:
+
+- **The level is now read.** The classic hooks carry `effort.level`, *"after any
+  silent downgrade"*, on anything firing inside a tool-use context.
+  `classic.PostToolUse` covers a turn that uses tools and `classic.Stop` one
+  that does not. Each hook reads one string and passes the event straight on.
+- **The control is a list, not a nudge.** `/sl-settings` spells out `session`,
+  `L`, `M`, `H`, `X`, `✦` and `e` steps through them. `session` is the first
+  choice and means this mod has no opinion: `turn.step` passes every request
+  through untouched and the band reports whatever the session is doing. A list
+  you pick from cannot be wrong about where it started.
+
+Unlike the layout, the effort choice is **not** stored. The layout is a
+preference that outlives the session; the effort of the requests this session
+sends is not.
 
 ## What goes where
 
 `/sl-settings` draws one row per item. Its key moves that item on: line 1, 2, 3,
-4, off, and round again. One key per item and no cursor to lose.
+4, off, and round again. One key per item and no cursor to lose. The effort
+control sits at the bottom of the same pane.
 
 The layout is stored in `$.store`, so it is per machine and outlives the
 session.

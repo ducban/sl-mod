@@ -460,14 +460,26 @@ async function sampleTokens($: EngineInterface) {
   }
 }
 
+// Effort is chosen outright, never nudged. Nudging needs a baseline, and the
+// baseline was a guess: the engine does not hand a mod the session's effort
+// until something reports it, so a relative press from an unknown start landed
+// on `medium + 1 = high` and showed `(H)` for a session that was not on high.
+// A list you pick from cannot be wrong about where it started.
+//
+// `null` is the first choice and means "no opinion": the band then reports
+// whatever the session is doing, and `turn.step` passes every request through
+// untouched.
+//
 // Declared up here, not inside `register`: `claude plugin validate` follows `$`
 // only into a function declared at the top of the file, and refuses a closure it
 // cannot trace. tsc was happy with it either way.
-function rotateEffort($: EngineInterface, by: number) {
-  const from = effortOverride ?? (effort as Effort | undefined) ?? 'medium'
-  const at = EFFORT_STEPS.indexOf(from)
-  const to = EFFORT_STEPS[Math.min(EFFORT_STEPS.length - 1, Math.max(0, at + by))]
-  if (to) effortOverride = to
+const EFFORT_CHOICES: (Effort | null)[] = [null, ...EFFORT_STEPS]
+
+function cycleEffort($: EngineInterface) {
+  const at = EFFORT_CHOICES.indexOf(effortOverride)
+  effortOverride = EFFORT_CHOICES[(at + 1) % EFFORT_CHOICES.length] ?? null
+  // Not stored. The layout is a preference that outlives the session; the
+  // effort of the requests this session sends is not.
   $.ui.invalidate('ui.render')
 }
 
@@ -697,6 +709,27 @@ export const register: Register = on => {
     yield* next(e)
   })
 
+  // The second source for effort, and the one that actually answers. `turn.step`
+  // carries `effort` only where the request names one -- "the session's setting
+  // or the model's default, absent for a model without effort" -- and in this
+  // session it never did, so the model cell showed no level until a press put
+  // one there. The classic hooks carry `effort.level` instead, "after any silent
+  // downgrade", on anything that fires inside a tool-use context.
+  //
+  // PostToolUse for a turn that uses tools, Stop for one that does not. Both do
+  // nothing but read a string, and both pass the event straight on.
+  on('classic.PostToolUse', async ($, e, next) => {
+    if (e.effort?.level) effort = e.effort.level
+
+    return next(e)
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    if (e.effort?.level) effort = e.effort.level
+
+    return next(e)
+  })
+
   on('command.run', { command: 'sl' }, async $ => {
     isHidden = !isHidden
     await $.store.set('isHidden', isHidden)
@@ -802,48 +835,6 @@ export const register: Register = on => {
     })
   })
 
-  // The controls, under the prompt.
-  //
-  // What was tried and did not work: a column tree here does not give two rows.
-  // The site is one row, and a tree carrying both the controls and the engine's
-  // `hint` string came out as one wrapped line with the engine's own text broken
-  // across it. So this draws the controls alone, and only while the session is
-  // idle -- while a turn runs, the hook passes and the engine keeps its line,
-  // because `esc to interrupt` is worth more than two buttons.
-  //
-  // The hotkeys are registered and not drawn. They do not fire from the composer
-  // -- the types say a bare digit presses a BAND Button and only a band Button,
-  // and that is what happens -- so printing `4:` in front of a label would be
-  // advertising a key that does nothing. `/sl-help` and `/sl-settings` are the
-  // keyboard route, and they open as two tabs of one pane.
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    if (isHidden || e.props.isWorking) return next(e)
-
-    const { Box, Button, Text } = $.ui.resolve(e)
-
-    return Box({
-      flexDirection: 'row',
-      columnGap: 1,
-      children: [
-        Text({ color: MUTED, children: ['effort:'] }),
-        Button({
-          key: 'effort-up',
-          label: ICON.up,
-          hotkey: '5',
-          dimColor: true,
-          onPress: () => rotateEffort($, 1),
-        }),
-        Button({
-          key: 'effort-down',
-          label: ICON.down,
-          hotkey: '4',
-          dimColor: true,
-          onPress: () => rotateEffort($, -1),
-        }),
-      ],
-    })
-  })
-
   // The settings pane. One key per item, and a press moves that item on:
   // 1, 2, 3, 4, off, 1. No cursor to keep track of.
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
@@ -884,12 +875,44 @@ export const register: Register = on => {
 
     const lines = buildLines(ctx)
 
+    // The five levels spelled out, with the one in force in brackets. `session`
+    // is a choice like any other and the first one: it means this mod has no
+    // opinion and the band reports whatever the session is doing.
+    const choices = EFFORT_CHOICES.map(choice => {
+      const name = choice === null ? 'session' : (EFFORT_LETTER[choice] ?? choice)
+
+      return choice === effortOverride ? `[${name}]` : ` ${name} `
+    }).join('')
+
     return Box({
       flexDirection: 'column',
       children: [
         Text({ color: MUTED, wrap: 'wrap', children: ['A key moves its item on: 1, 2, 3, 4, off.'] }),
         Text({ children: [' '] }),
         ...ITEMS.map(itemRow),
+        Text({ children: [' '] }),
+        Text({ color: BLUE, bold: true, children: ['Effort'] }),
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Button({
+              key: 'item-effort',
+              label: 'effort'.padEnd(9),
+              hotkey: 'e',
+              plain: true,
+              onPress: () => cycleEffort($),
+            }),
+            Text({ color: effortOverride === null ? MUTED : BLUE, children: [choices] }),
+          ],
+        }),
+        Text({
+          color: MUTED,
+          wrap: 'wrap',
+          children: [
+            `the session itself reports ${effort ?? 'nothing yet -- it is read off the first tool call or the end of the first turn'}`,
+          ],
+        }),
         Text({ children: [' '] }),
         Text({ color: BLUE, bold: true, children: ['As the band will draw it'] }),
         ...(lines.length === 0
@@ -955,7 +978,7 @@ export const register: Register = on => {
         line(`L M H X ${EFFORT_LETTER.max}`, 'low, medium, high, xhigh, max'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
-        line(`effort: ${ICON.up} ${ICON.down}`, 'under the prompt, clicked -- the keys do not fire there'),
+        line('effort (e)', 'in /sl-settings: session, low, medium, high, xhigh, max -- picked outright, never nudged'),
         line('/sl', 'hide or show the band'),
         line('/sl-settings', 'choose what shows, and on which line'),
         line('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
