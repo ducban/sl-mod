@@ -25,17 +25,26 @@ Line one is identity, line two is budget, and the icons follow that split.
 Each bar is five segments of 20%, rounded **up**, so 19% shows one segment
 rather than none — a quota must never read lower than it is.
 
-Line two is built by walking `$.session.usage().rateLimits` rather than asking
-for two windows by name. The documented kinds are `five_hour`, `seven_day` and
-`spend_limit`, but the 2.1.289 binary carries nine, and `/usage` shows a
-per-model week — so a hardcoded pair would have dropped the Fable window, the
-one segment this was asked for.
+Line two walks whatever windows come back rather than asking for two by name.
+That matters: the engine hands a mod `five_hour` and `seven_day` and drops the
+per-model week, the `Current week (Fable)` row in `/usage`. It's filtered out of
+the status line payload too.
+
+`$.session.authorize()` gets round that. It answers an opaque handle for the
+session's own Anthropic credential, and `$.http.fetch(url, { auth: handle })`
+spends it against a first-party host. The credential never reaches the mod, which
+also means the mod never refreshes it — so the token rotation that can cost you a
+Claude Code session isn't in play. Nothing to install, on any machine.
+
+When that reading is older than fifteen minutes it isn't drawn, and the engine's
+two live windows are used instead. Two bars beat three bars holding an old
+number.
 
 ## State
 
-Step 1 only: `/sl-debug` prints what the engine reports, and nothing is drawn
-yet. It exists because no static source says whether `rateLimits` carries the
-per-model windows or under what `kind`.
+Both rows draw. Effort rotates with `4` and `5` from an empty prompt, `0` opens
+the legend, and `/sl`, `/sl-help`, `/sl-effort` and `/sl-debug` work. Six tests
+pass under `claude plugin test`.
 
 ## Run it
 

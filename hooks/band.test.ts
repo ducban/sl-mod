@@ -121,40 +121,33 @@ test('the band stands aside for a survey', async ($, on) => {
   await ui.unmount()
 })
 
-// --- the ccuc-remote source, and the three ways it can have nothing to say ----
-// These are the paths no running session will show clearly: a bar that is absent
-// looks the same whether the data was missing or the code was wrong.
+// --- the usage endpoint, and the three ways it can have nothing to say -------
+// No running session shows these clearly: a bar that is absent looks the same
+// whether the data was missing or the code was wrong.
 
-const HOME = '/home/test'
-const ACCOUNT = JSON.stringify({ oauthAccount: { emailAddress: 'A@Example.com' } })
 const BOOK = '\u{F02D}' // the per-model window's icon
 
-// A reply shaped like the agreed contract, with the per-model week in it.
-const reply = (lastOkAt: string) =>
+const reply = () =>
   JSON.stringify({
-    schema: 1,
-    served_at: lastOkAt,
-    as_of: lastOkAt,
-    account: { label: 'a', email: 'a@example.com', uuid: 'u' },
-    reported_by: 'linode',
-    fetch: { status: 'ok', last_ok_at: lastOkAt, error: null },
-    windows: [
-      { kind: 'session', scope: null, percent: 8, resets_at: lastOkAt },
-      { kind: 'weekly_all', scope: null, percent: 36, resets_at: lastOkAt },
-      { kind: 'weekly_scoped', scope: 'Fable', percent: 25, resets_at: lastOkAt },
+    limits: [
+      { kind: 'session', group: 'session', percent: 9, scope: null },
+      { kind: 'weekly_all', group: 'weekly', percent: 39, scope: null },
+      {
+        kind: 'weekly_scoped',
+        group: 'weekly',
+        percent: 26,
+        scope: { model: { id: null, display_name: 'Fable' } },
+      },
     ],
   })
 
-const remoteStand = (on: On, opts: { token?: string; body?: string; status?: number }) => {
-  mock.env(on, { HOME })
-  on('fs.read', ($, e) => {
-    if (e.path.endsWith('/.ccuc/read-token')) {
-      return opts.token === undefined ? { deny: 'ENOENT' } : { value: opts.token }
-    }
-    if (e.path.endsWith('/.claude.json')) return { value: ACCOUNT }
-
-    return { deny: 'ENOENT' }
-  })
+const endpoint = (
+  on: On,
+  opts: { auth?: boolean; body?: string; status?: number },
+) => {
+  on('session.authorize', () =>
+    opts.auth === false ? { value: null } : { value: { handle: 'h', kind: 'bearer' as const } },
+  )
   on('http.fetch', () => ({
     value: {
       status: opts.status ?? 200,
@@ -165,43 +158,43 @@ const remoteStand = (on: On, opts: { token?: string; body?: string; status?: num
   }))
 }
 
-test('with no token the band falls back to the live windows, not to zeroes', async ($, on) => {
+test('with no credential to spend, the live windows stay and nothing is invented', async ($, on) => {
   stand(on)
-  remoteStand(on, {})
+  endpoint(on, { auth: false })
 
-  // The mount only draws; this is what fills the readings in.
   await $.classic.SessionStart({ source: 'startup' })
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
-  // The two live windows are there, and the per-model one is not invented.
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
 
   await ui.unmount()
 })
 
-test('a fresh reply adds the per-model week', async ($, on) => {
+test('a fresh reading adds the per-model week', async ($, on) => {
   stand(on, Date.parse('2026-10-06T12:00:00Z'))
-  remoteStand(on, { token: 't', body: reply('2026-10-06T11:59:00Z') })
+  endpoint(on, { body: reply() })
 
   await $.classic.SessionStart({ source: 'startup' })
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
-  expect(await ui.find({ type: 'Text', text: new RegExp(`${BOOK}.*25%`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`${BOOK}.*26%`) })).toBeDefined()
+  // The endpoint's own figure wins over the engine's for the week, so the row
+  // comes from one reading rather than two that disagree.
+  expect(await ui.find({ type: 'Text', text: /39%/ })).toBeDefined()
 
   await ui.unmount()
 })
 
-test('a reply older than the staleness bound is not drawn at all', async ($, on) => {
-  stand(on, Date.parse('2026-10-06T12:00:00Z'))
-  // 20 minutes old, past the 15-minute bound.
-  remoteStand(on, { token: 't', body: reply('2026-10-06T11:40:00Z') })
+test('a 401 keeps the live windows rather than blanking the row', async ($, on) => {
+  stand(on)
+  endpoint(on, { status: 401, body: '{"error":"unauthorized"}' })
 
   await $.classic.SessionStart({ source: 'startup' })
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
-  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
 
   await ui.unmount()
 })

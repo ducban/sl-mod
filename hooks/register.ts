@@ -124,18 +124,18 @@ const ICON = NERD
       window: '\u{2756}', // ❖
     }
 
-const iconFor = (kind: string, scope?: string | null) =>
-  // A window scoped to a model is the per-model week, whatever the engine or
-  // ccuc ends up calling its kind. The scope decides, not the name.
-  scope
-    ? ICON.window
-    : kind === 'five_hour'
-    ? ICON.five_hour
-    : kind === 'seven_day'
-      ? ICON.seven_day
-      : kind === 'spend_limit'
-        ? ICON.spend_limit
-        : ICON.window
+// Two vocabularies for the same thing. The engine says `five_hour` and
+// `seven_day`; the endpoint says `session`, `weekly_all` and `weekly_scoped`.
+// Both are mapped, and a window with a scope takes the per-model icon whatever
+// its kind is called, so a name added later still draws.
+const iconFor = (kind: string, scope?: string | null) => {
+  if (scope) return ICON.window
+  if (kind === 'five_hour' || kind === 'session') return ICON.five_hour
+  if (kind === 'seven_day' || kind === 'weekly_all') return ICON.seven_day
+  if (kind === 'spend_limit') return ICON.spend_limit
+
+  return ICON.window
+}
 
 // --- What the drawing reads --------------------------------------------------
 // Module-level, so a redraw costs nothing. They go back to their defaults when
@@ -160,186 +160,106 @@ let effortOverride: Effort | null = null
 
 const PANE = 'sl-legend'
 
-// --- The ccuc-remote source --------------------------------------------------
+// --- Where the windows come from --------------------------------------------
 // The engine hands a mod two windows, `five_hour` and `seven_day`. The per-model
-// week -- "Current week (Fable)" in `/usage` -- never reaches a mod or the status
-// line payload: the engine filters it out of both. ccuc already fetches it, so
-// ccuc-remote serves it back, and it serves every window at once rather than just
-// the missing one, so what the band draws comes from one reading.
+// week -- "Current week (Fable)" in /usage -- reaches neither a mod nor the
+// status line payload, because the engine filters it out of both.
 //
-// Querying by this machine's own account is what makes that safe. Three machines
-// push to ccuc-remote; asking for someone else's account would draw their
-// numbers under this prompt.
-const REMOTE_URL = 'https://ccuc.hiem.co/api/usage'
+// `$.session.authorize()` gets round that without a credential ever reaching
+// here. It answers an opaque handle for the session's own Anthropic token, and
+// `$.http.fetch(url, { auth: handle })` spends it against a first-party host.
+// The mod never reads .credentials.json and never refreshes anything, so the
+// token rotation that can kill a Claude Code session is not in play: the engine
+// owns the credential and keeps it fresh.
+//
+// Measured on this box: handle present, kind=bearer, HTTP 200, three windows
+// including `weekly_scoped (Fable) 26%`.
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const USAGE_BETA = 'oauth-2025-04-20'
 const POLL_MS = 180_000
-// Past this, the remote reading is not drawn at all and the engine's two live
-// windows are used instead. Fewer bars is honest; a stale bar is not.
-const REMOTE_STALE_MS = 15 * 60_000
+// Past this the reading isn't drawn and the engine's two live windows are used
+// instead. Fewer bars is honest; a bar holding an hour-old number isn't.
+const STALE_MS = 15 * 60_000
 
-type Remote = {
+type Reading = {
   windows: Window[]
-  lastOkAt: number | null // when the numbers were measured
-  asOf: number | null // when any machine last reported -- is the pipeline alive
-  reportedBy: string | null
-  note: string // why there is nothing to draw, in words, for /sl-debug
+  at: number | null // when this came back, by $.clock.now()
+  note: string // why there's nothing, in words, for /sl-debug
 }
-let remote: Remote = { windows: [], lastOkAt: null, asOf: null, reportedBy: null, note: 'not fetched yet' }
+let reading: Reading = { windows: [], at: null, note: 'not fetched yet' }
 
-const msOf = (iso: unknown) => {
-  if (typeof iso !== 'string') return null
-  const at = Date.parse(iso)
-  return Number.isNaN(at) ? null : at
-}
-
-// Reads are attempted every cycle rather than cached, so creating the token file
-// or logging into another account takes effect without restarting Claude Code.
-async function readLine($: EngineInterface, path: string) {
-  try {
-    const got = await $.fs.read(path)
-    return typeof got === 'string' ? got.trim() : null
-  } catch {
-    return null
-  }
-}
-
-// A probe, run only by /sl-debug, for a route that would need no token at all.
-// `$.session.authorize()` hands back an opaque handle for the session's own
-// Anthropic credential -- the secret never reaches the plugin -- and
-// `$.http.fetch(url, { auth: handle })` spends it, for a first-party host only.
-// If that reaches the usage endpoint, the per-model week is available on any
-// machine with no file to install and no refresh-token risk, because the engine
-// keeps the credential fresh and this never touches it.
-async function probeAuthorize($: EngineInterface) {
-  const out: string[] = []
+async function refreshUsage($: EngineInterface) {
   let auth
   try {
     auth = await $.session.authorize()
   } catch (err) {
-    return [`authorize: threw -- ${String(err).slice(0, 90)}`]
-  }
-  if (!auth) return ['authorize: null (no first-party credential: a gateway, a 3P provider, or no login)']
-  out.push(`authorize: handle present, kind=${auth.kind}`)
-
-  try {
-    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage', {
-      auth: auth.handle,
-      headers: { 'anthropic-beta': 'oauth-2025-04-20' },
-    })
-    out.push(`  oauth/usage: HTTP ${res.status}`)
-    if (res.ok) {
-      const limits = (JSON.parse(res.text) as Record<string, any>)?.limits
-      if (Array.isArray(limits)) {
-        out.push(`  limits: ${limits.length} entry(s)`)
-        for (const l of limits) {
-          const scope = l?.scope?.model?.display_name ?? null
-          out.push(`    ${l?.kind} ${scope ? `(${scope}) ` : ''}${l?.percent}%`)
-        }
-      } else {
-        out.push('  limits: absent from the body')
-      }
-    } else {
-      out.push(`  body: ${res.text.slice(0, 120)}`)
-    }
-  } catch (err) {
-    out.push(`  oauth/usage: threw -- ${String(err).slice(0, 90)}`)
-  }
-
-  return out
-}
-
-async function refreshRemote($: EngineInterface) {
-  const home = (await $.env.get('HOME')) ?? ''
-  const token = await readLine($, `${home}/.ccuc/read-token`)
-  if (!token) {
-    remote = { ...remote, note: `no token at ~/.ccuc/read-token` }
+    reading = { ...reading, note: `authorize threw: ${String(err).slice(0, 80)}` }
 
     return
   }
-
-  // The account this machine is logged into, not whichever one ccuc favours.
-  // ~/.claude.json holds account metadata and no credential of any kind.
-  const raw = await readLine($, `${home}/.claude.json`)
-  let email: string | null = null
-  try {
-    email = raw ? (JSON.parse(raw)?.oauthAccount?.emailAddress ?? null) : null
-  } catch {
-    email = null
-  }
-  if (!email) {
-    remote = { ...remote, note: 'no account email in ~/.claude.json' }
+  // Null behind a gateway, on a third-party provider, or with nobody logged in.
+  if (!auth) {
+    reading = { ...reading, note: 'no first-party credential to spend' }
 
     return
   }
 
   let res
   try {
-    res = await $.http.fetch(REMOTE_URL, {
-      headers: { 'X-Ccuc-Account': email.toLowerCase(), Authorization: `Bearer ${token}` },
+    res = await $.http.fetch(USAGE_URL, {
+      auth: auth.handle,
+      headers: { 'anthropic-beta': USAGE_BETA },
     })
   } catch (err) {
-    // Keep whatever was last good; only the note changes.
-    remote = { ...remote, note: `unreachable: ${String(err).slice(0, 80)}` }
+    reading = { ...reading, note: `unreachable: ${String(err).slice(0, 80)}` }
 
     return
   }
   if (!res.ok) {
-    remote = { ...remote, note: `http ${res.status}` }
+    reading = { ...reading, note: `http ${res.status}` }
 
     return
   }
 
-  let body: Record<string, unknown>
+  let limits: unknown
   try {
-    body = JSON.parse(res.text) as Record<string, unknown>
+    limits = (JSON.parse(res.text) as Record<string, unknown>).limits
   } catch {
-    remote = { ...remote, note: 'response was not JSON' }
+    reading = { ...reading, note: 'response was not JSON' }
 
     return
   }
-  // An unknown schema is refused rather than guessed at: fields are only added
-  // within a schema, so a bump means something was renamed or removed.
-  if (body.schema !== 1) {
-    remote = { ...remote, note: `unknown schema ${String(body.schema)}` }
+  if (!Array.isArray(limits)) {
+    reading = { ...reading, note: 'no limits array in the body' }
 
     return
   }
 
-  const lastOkAt = msOf(body.last_ok_at ?? (body.fetch as Record<string, unknown> | undefined)?.last_ok_at)
-  const list = Array.isArray(body.windows) ? body.windows : []
-  // last_ok_at null means no machine has ever fetched this account: there are no
-  // numbers, and drawing zeroes would be inventing them.
-  remote = {
-    windows:
-      lastOkAt === null
-        ? []
-        : list.flatMap(w => {
-            const one = w as Record<string, unknown>
-            const kind = typeof one.kind === 'string' ? one.kind : null
-            const percent = typeof one.percent === 'number' ? one.percent : null
-            if (kind === null || percent === null) return []
-            // ccuc sends `scope` as a flat string; the engine's own cache sends
-            // `{ model: { display_name } }`. Normalise, so a future second
-            // source cannot change what a bar is labelled.
-            const scope =
-              typeof one.scope === 'string'
-                ? one.scope
-                : ((one.scope as Record<string, any> | null)?.model?.display_name ?? null)
-            return [{ kind, percentUsed: percent, scope }]
-          }),
-    lastOkAt,
-    asOf: msOf(body.as_of),
-    reportedBy: typeof body.reported_by === 'string' ? body.reported_by : null,
-    note: lastOkAt === null ? 'reachable, but no machine has fetched this account yet' : '',
+  const windows = limits.flatMap(entry => {
+    const one = entry as Record<string, any>
+    const kind = typeof one.kind === 'string' ? one.kind : null
+    const percent = typeof one.percent === 'number' ? one.percent : null
+    if (kind === null || percent === null) return []
+
+    return [{ kind, percentUsed: percent, scope: one.scope?.model?.display_name ?? null }]
+  })
+
+  // An empty array means the account has no window to report. Drawing zeroes
+  // would be inventing them, so nothing is drawn.
+  reading = {
+    windows,
+    at: windows.length > 0 ? await $.clock.now() : null,
+    note: windows.length > 0 ? '' : 'the body carried no windows',
   }
 }
 
-// A digit is the only key that reaches a band Button without the band having
-// keyboard focus, and only from an empty prompt -- every letter goes to the
-// composer. So the rotate keys are digits, and 1-3 are left free for tabs.
+// A digit is the only key that reaches a band Button while the band has no
+// keyboard focus, and then only from an empty prompt -- every letter goes to the
+// composer. So the rotate keys are digits, and 1-3 stay free for tabs.
 //
 // Declared up here, not inside `register`: `claude plugin validate` follows `$`
-// only into a function declared at the top of the file, and refuses a closure
-// it cannot trace. tsc was happy with it either way.
+// only into a function declared at the top of the file, and refuses a closure it
+// cannot trace. tsc was happy with it either way.
 function rotateEffort($: EngineInterface, by: number) {
   const from = effortOverride ?? (effort as Effort | undefined) ?? 'medium'
   const at = EFFORT_STEPS.indexOf(from)
@@ -394,10 +314,10 @@ export const register: Register = on => {
     // off the draw path, where its cost does not show.
     $.clock.every(5000, () => void refreshGit($))
 
-    // ccuc-remote changes every ~5 minutes, so 180 s is ample. Also off the draw
-    // path: a network call must never sit between a keystroke and a frame.
-    void refreshRemote($)
-    $.clock.every(POLL_MS, () => void refreshRemote($))
+    // Off the draw path, always: a network call must never sit between a
+    // keystroke and a frame.
+    void refreshUsage($)
+    $.clock.every(POLL_MS, () => void refreshUsage($))
 
     return next(e)
   })
@@ -405,13 +325,13 @@ export const register: Register = on => {
   // `session.start` does not fire after /clear, /resume or /branch -- the guide
   // is explicit about it -- so the readings would quietly age from whenever the
   // session began. This picks them up again. It also happens to be the only
-  // event a test can raise, which is how the remote paths below are covered.
+  // event a test can raise, which is how the fallback paths below are covered.
   on('classic.SessionStart', async ($, e, next) => {
     const usage = await $.session.usage()
     contextPercent = usage.context.percent ?? null
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     await refreshGit($)
-    await refreshRemote($)
+    await refreshUsage($)
 
     return next(e)
   })
@@ -482,11 +402,9 @@ export const register: Register = on => {
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,
         `git: branch=${branch} dirty=${isDirty} ahead=${isAhead}`,
-        ...(await probeAuthorize($)),
-        `remote: ${remote.windows.length} window(s), reported_by=${remote.reportedBy ?? '-'}`,
-        `  last_ok_at=${remote.lastOkAt === null ? 'null' : new Date(remote.lastOkAt).toISOString()}`,
-        `  as_of=${remote.asOf === null ? 'null' : new Date(remote.asOf).toISOString()}`,
-        `  note=${remote.note || 'ok'}`,
+        `usage endpoint: ${reading.windows.length} window(s)`,
+        ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
+        `  note=${reading.note || 'ok'}`,
       ].join('\n'),
     }
   })
@@ -578,10 +496,9 @@ export const register: Register = on => {
     // staleness bound the engine's two live windows are used instead. Fewer bars
     // is honest, a bar holding a number from an hour ago is not.
     const now = await $.clock.now()
-    const remoteAge = remote.lastOkAt === null ? null : now - remote.lastOkAt
-    const useRemote =
-      remote.windows.length > 0 && remoteAge !== null && remoteAge < REMOTE_STALE_MS
-    const shown = useRemote ? remote.windows : windows
+    const age = reading.at === null ? null : now - reading.at
+    const fresh = reading.windows.length > 0 && age !== null && age < STALE_MS
+    const shown = fresh ? reading.windows : windows
 
     // Every gauge means the same thing -- how much of an allowance is gone --
     // so they can sit in one row and be read at a glance.
