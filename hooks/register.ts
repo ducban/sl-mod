@@ -199,6 +199,9 @@ const labelForWindow = (w: Window) => {
 // the module reloads, and each is filled again by the hook that owns it.
 type Effort = (typeof EFFORT_STEPS)[number]
 let contextPercent: number | null = null
+// Kept so a compaction can recompute the percent from the token count it
+// reports. Every reading of usage carries it, so it costs nothing to hold.
+let contextWindow: number | null = null
 let windows: Window[] = []
 let effort: string | undefined
 let branch: string | null = null
@@ -707,6 +710,7 @@ export const register: Register = on => {
   on('classic.SessionStart', async ($, e, next) => {
     const usage = await $.session.usage()
     contextPercent = usage.context.percent ?? null
+    contextWindow = usage.context.window ?? null
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = usage.cost?.usd ?? null
     // Awaited here, not fired and forgotten: this is the only event a test can
@@ -723,11 +727,47 @@ export const register: Register = on => {
   // Pushed, not polled: this fires when a figure actually moves.
   on('session.measure', async ($, e, next) => {
     contextPercent = e.context.percent ?? contextPercent
+    contextWindow = e.context.window ?? contextWindow
     windows = e.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = e.cost?.usd ?? costUsd
     // `cost` in `changed` is the engine saying a priced response landed, which
     // is exactly once per response: the dedup signal the token counts need.
     if (e.changed.includes('cost')) await sampleTokens($)
+
+    return next(e)
+  })
+
+  // A compaction empties most of the window, and `session.measure` does not fire
+  // for it: Ban watched a session compact and the `ct` gauge sit at 38%. The
+  // number was not wrong when it was taken, which is the worst kind of wrong --
+  // it reads as current.
+  //
+  // The compaction's own result carries what the window came down to, so this
+  // takes the figure from the event rather than asking again. Asking again does
+  // not help on its own: `context.tokens` is "input tokens the LAST RESPONSE was
+  // answered over", and right after a compaction there has not been one yet.
+  on('session.compact', async ($, e, next) => {
+    const done = await next(e)
+    if (done.skip === undefined && typeof done.tokensAfter === 'number' && contextWindow) {
+      contextPercent = Math.round((done.tokensAfter / contextWindow) * 100)
+      $.ui.invalidate('ui.render')
+    }
+
+    return done
+  })
+
+  // The backstop, for a compaction that reports no token count: re-read, and
+  // take the answer only if it actually moved down. A reading that has not
+  // caught up yet is the pre-compaction one, and writing it back would just
+  // re-pin the stale number.
+  on('classic.PostCompact', async ($, e, next) => {
+    const usage = await $.session.usage()
+    const now = usage.context.percent ?? null
+    if (now !== null && (contextPercent === null || now < contextPercent)) {
+      contextPercent = now
+      contextWindow = usage.context.window ?? contextWindow
+      $.ui.invalidate('ui.render')
+    }
 
     return next(e)
   })

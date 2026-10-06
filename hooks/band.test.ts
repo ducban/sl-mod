@@ -44,7 +44,12 @@ const SURFACES = ['terminal', 'desktop'] as const
 // Nothing sits beneath the plugin in a test, so the test is the engine: every
 // call the mod makes has to be answered here or its hook is skipped. `mock`
 // covers clock, store and env; the rest is spelled out.
-const stand = (on: On, now?: number, usage?: SessionUsage, hasVersionFile = true) => {
+const stand = (
+  on: On,
+  now?: number,
+  usage?: SessionUsage | (() => SessionUsage),
+  hasVersionFile = true,
+) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
   // load with `on("clock.now") registered twice`.
@@ -53,7 +58,7 @@ const stand = (on: On, now?: number, usage?: SessionUsage, hasVersionFile = true
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
   on('session.usage', () => ({
-    value: usage ?? {
+    value: (typeof usage === 'function' ? usage() : usage) ?? {
       startedAt: 0,
       context: { tokens: 660000, window: 1000000, percent: 66 },
       rateLimits: [
@@ -382,6 +387,45 @@ test('a repo with no version does not take the git cell down with it', async ($,
 
   expect(await ui.find({ type: 'Text', text: /main/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /0\.1\.0/ })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('a compaction drops the context gauge instead of pinning the old number', async ($, on) => {
+  // `session.measure` does not fire for a compaction: Ban watched a session
+  // compact and the `ct` gauge sit at 38%. That number was true when it was
+  // taken, which is the worst kind of wrong -- it reads as current.
+  //
+  // Two hooks cover it. `session.compact` takes the figure straight off the
+  // compaction's own result (`tokensAfter`), which is the better source but
+  // cannot be raised here: the harness has no transcript, so `e.messages` is not
+  // a list and every hook in the chain is skipped for passing it on. What is
+  // tested is the backstop, `classic.PostCompact`, and its guard.
+  let percent = 66
+  const reading = (): SessionUsage => ({
+    startedAt: 0,
+    context: { tokens: percent * 10_000, window: 1_000_000, percent },
+    rateLimits: [],
+    cost: { usd: 1 },
+  })
+  stand(on, undefined, reading)
+  on('classic.PostCompact', () => ({}))
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /ct .* 66%/ })).toBeDefined()
+
+  percent = 9
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'summary' })
+  expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /66%/ })).toBeUndefined()
+
+  // The guard: a reading that has not caught up yet still holds the
+  // pre-compaction figure, and writing it back would re-pin the stale number.
+  // So only a figure that moved DOWN is taken.
+  percent = 80
+  await $.classic.PostCompact({ trigger: 'auto', compact_summary: 'summary' })
+  expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
 
   await ui.unmount()
 })

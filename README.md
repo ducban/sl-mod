@@ -44,8 +44,30 @@ number.
 
 ## State
 
+### compaction
+
+`session.measure` does **not** fire for a compaction, so the context gauge used
+to keep the figure from before it — 38% on a session that had just emptied its
+window. True when it was taken, which is the worst kind of wrong, because it
+reads as current.
+
+Two hooks cover it. `session.compact` takes the number off the compaction's own
+result (`tokensAfter`), which is the better source: asking again does not help on
+its own, because `context.tokens` is *"input tokens the last response was
+answered over"* and right after a compaction there has not been one.
+`classic.PostCompact` is the backstop for a compaction that reports no count, and
+it takes the new reading **only if it moved down** — a reading that has not caught
+up yet still holds the pre-compaction figure, and writing it back would re-pin
+the stale number.
+
+The `session.compact` path has no test: the harness has no transcript, so
+`e.messages` is not a list and every hook in the chain is skipped for passing it
+on. The backstop and its guard are tested.
+
+## State
+
 Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
-`/sl-effort` and `/sl-debug` work. Twelve tests pass under `claude plugin test`,
+`/sl-effort` and `/sl-debug` work. Thirteen tests pass under `claude plugin test`,
 `tsc -p .` is clean and `claude plugin validate` passes.
 
 Every polled figure carries a note saying why it has nothing, and `/sl-debug`
