@@ -17,11 +17,15 @@ it. The two lines move; they do not stay where `statusLine` put them.
 ## What it shows
 
 ```
-  arch   Opus ▮▮▯▯▯ (M)   main ●                                 ?
- ◔ ▰▰▱▱▱ 31%   ▰▱▱▱▱ 8%   ▰▰▱▱▱ 35%   ▰▰▱▱▱ 25%
+  arch     Opus 5 ▮▮▮▯▯ (H)    main ✓
+ ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
+
+ > │
+   ? for shortcuts  4: less  5: more  0: help
 ```
 
-Line one is identity, line two is budget, and the icons follow that split.
+Line one is identity, line two is budget, and the controls sit in the engine's
+own hint line under the prompt.
 Each bar is five segments of 20%, rounded **up**, so 19% shows one segment
 rather than none — a quota must never read lower than it is.
 
@@ -42,9 +46,15 @@ number.
 
 ## State
 
-Both rows draw. Effort rotates with `4` and `5` from an empty prompt, `0` opens
-the legend, and `/sl`, `/sl-help`, `/sl-effort` and `/sl-debug` work. Six tests
-pass under `claude plugin test`.
+Both rows draw. `4` and `5` rotate effort, `0` opens the legend, and `/sl`,
+`/sl-help`, `/sl-effort` and `/sl-debug` work. Eight tests pass under
+`claude plugin test`.
+
+One thing to watch since the controls moved under the prompt: the API types say
+a bare digit from an empty composer presses a **band** Button and only a band
+Button. Nothing says a hint-line Button is reachable the same way. The buttons
+are clickable regardless, and `/sl-effort <level>` sets it outright. If `4` and
+`5` go dead, the fix is to put the Box back at the end of the identity row.
 
 ## Run it
 
@@ -66,10 +76,19 @@ The old `statusLine` command was removed from `~/.claude/settings.json` on
 },
 ```
 
-## Why labels and not icons
+## Icons on row one, words on row two
 
-Nerd Font glyphs drew visibly smaller than the text beside them, and a mod can't
-fix that. JetBrains Mono carries none of them, so each is drawn by whichever
-fallback font fontconfig reaches, at that font's metrics. It has `◔ ■ □ █ ░ │ ·
-✓ ●` and not `▰ ▱ ▮ ▯`. Short words avoid the question and say more than a glyph
-does: `ct`, `5h`, `7d`, and the model's own name for a scoped window.
+Row one takes Nerd Font icons. They draw a shade smaller than the text beside
+them and a mod can't fix that: JetBrains Mono carries none of them, so each is
+drawn by whichever fallback font fontconfig reaches, at that font's metrics. It
+has `◔ ■ □ █ ░ │ · ✓ ●` and not `▰ ▱ ▮ ▯` or anything in the Nerd Font private
+use area. Choosing the font is the terminal's call, not the mod's.
+
+Row two takes words — `ct`, `5h`, `7d`, and the model's own name for a scoped
+window. A word renders at the row's own size, and the budget row is the half
+that has to be read fast.
+
+Every glyph in the source is written as a `\u{...}` escape. Written as
+characters they were lost in a file write once already, and the symptom was
+quiet: every icon became an empty string, and the powerline separator between
+two cells drew nothing at all for four commits.

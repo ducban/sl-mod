@@ -20,6 +20,12 @@ const BAND = {
   },
 }
 
+// The controls moved out of the band and into the dim line under the prompt.
+const HINT = {
+  component: 'PromptHint' as const,
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+}
+
 const SURFACES = ['terminal', 'desktop'] as const
 
 // Nothing sits beneath the plugin in a test, so the test is the engine: every
@@ -80,10 +86,25 @@ test('the band draws on every surface, not just the terminal', async ($, on) => 
     // before any usage figure has been measured.
     expect(await ui.find({ type: 'Text', text: /Opus|Sonnet|Haiku|Fable/ })).toBeDefined()
 
-    // All three controls, by the keys the hotkeys are bound to.
+    await ui.unmount()
+  }
+})
+
+test('the controls draw under the prompt, with the engine line kept', async ($, on) => {
+  stand(on)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'sl-mod', surface, ...HINT })
+
+    // All three, by the keys the hotkeys are bound to.
     for (const key of ['effort-down', 'effort-up', 'legend']) {
       expect(await ui.find({ key })).toBeDefined()
     }
+
+    // A tree replaces the engine's line rather than adding to it, so the line
+    // has to be carried across by hand. Dropping it is the easy mistake and it
+    // takes `esc to interrupt` with it.
+    expect(await ui.find({ type: 'Text', text: /\? for shortcuts/ })).toBeDefined()
 
     await ui.unmount()
   }
@@ -92,18 +113,20 @@ test('the band draws on every surface, not just the terminal', async ($, on) => 
 test('rotating effort marks the row, so the band shows what will be sent', async ($, on) => {
   stand(on)
 
-  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  // No turn has run, so `turn.step` has never reported an effort and the model
+  // cell carries none: a level is drawn only once there is one to draw.
+  const band = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeUndefined()
 
-  // Nothing has overridden anything yet, so no star.
-  expect(await ui.find({ type: 'Text', text: /\*\)/ })).toBeUndefined()
+  // The button that moves it is under the prompt now, and the band has to
+  // redraw off a press that happened on another surface entirely.
+  const hint = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...HINT })
+  await hint.press({ key: 'effort-up' })
 
-  await ui.press({ key: 'effort-up' })
+  expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeDefined()
 
-  // One press is enough: the star says this mod is steering, and the letter is
-  // one of the five levels.
-  expect(await ui.find({ type: 'Text', text: /\((L|M|H|X|✦)\*\)/ })).toBeDefined()
-
-  await ui.unmount()
+  await hint.unmount()
+  await band.unmount()
 })
 
 test('the band stands aside for a survey', async ($, on) => {

@@ -87,31 +87,28 @@ const effortBar = (level: string | undefined) => {
   }
 }
 
-// A window's icon, by the kind the engine reports. Unknown kinds still draw --
-// the row is built by walking whatever comes back, never by asking for two
-// windows by name. The documented kinds are `five_hour`, `seven_day` and
-// `spend_limit`; the 2.1.289 binary carries nine, and `/usage` shows a
-// per-model week that neither this API nor the status line payload passes on.
-// So a hardcoded pair would silently drop whatever is added next.
-// Written as escapes, not as the characters themselves: the glyphs were lost
-// in transit the first time and every icon came out as an empty string.
+// The three identity cells take icons again. Written as escapes, not as the
+// characters themselves: the glyphs were lost in transit the first time and
+// every icon came out an empty string -- the same accident that left the
+// powerline separator below drawing nothing at all.
 //
-// NERD is false for a box that has no Nerd Font. The fallback set is plain
-// Unicode, and the same glyphs the old status line was already drawing here, so
-// it is known to render. This box does have Nerd Fonts -- 2126 of them -- and
-// JetBrains Mono reaches them through fontconfig, which is how `\u{2731}` and
-// `\u{2387}` show today although JetBrains Mono carries neither.
-// Labels, not icons. Nerd Font glyphs here came out visibly smaller than the
-// text beside them, and that cannot be fixed from a mod: JetBrains Mono carries
-// none of them, so each one is drawn by whichever fallback font fontconfig
-// reaches, at that font's metrics. Only a character JetBrains Mono has itself
-// renders at the same size -- it has `◔ ■ □ █ ░ │ · ✓ ●` and not `▰ ▱ ▮ ▯`.
-//
-// Short words sidestep the whole question, and they say more than a glyph does.
+// They sit a shade smaller than the text beside them and that cannot be fixed
+// from here: JetBrains Mono carries none of these, so fontconfig draws each
+// from whichever fallback font has it, at that font's metrics. A mod does not
+// choose the font.
+const ICON = {
+  folder: '\u{F07B}', //  nf-fa-folder
+  model: '\u{F1B2}', //  nf-fa-cube
+  branch: '\u{E725}', //  nf-dev-git_branch
+  dirty: '\u{25CF}', // ● uncommitted changes
+  ahead: '\u{21E1}', // ⇡ ahead of upstream
+  clean: '\u{2713}', // ✓ nothing to commit
+  sep: '\u{E0B0}', //  the powerline separator between two cells
+}
+
+// The gauges stay worded. A word is read at the size of the row and says more
+// than a glyph; the windows are the half of the band that has to be read fast.
 const LABEL = {
-  folder: 'dir',
-  model: 'model',
-  branch: 'git',
   context: 'ct',
   five_hour: '5h',
   seven_day: '7d',
@@ -439,7 +436,7 @@ export const register: Register = on => {
     // A survey owns the band while it is up; stand aside rather than fight it.
     if (e.props.hasSurvey || isHidden) return next(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     const cwd = await $.session.cwd()
     const folder = cwd.replace(/\/+$/, '').split('/').pop() || '/'
     const model = await $.session.model()
@@ -447,83 +444,47 @@ export const register: Register = on => {
     // While Claude works the spinner is what matters, so the row steps back.
     const dim = e.props.isWorking
 
-    // One powerline cell: its own background, and a separator carrying this
-    // background as its foreground so it melts into the next cell.
+    // One powerline row. Each cell takes the next cell's background as its
+    // separator's foreground, so the two melt into one another; the last
+    // separator has nothing after it and takes none, or it draws a stub of
+    // colour hanging off the end of the row.
     //
     // No `key` on these. `Text` does not take one, and a prop an element does
     // not take makes the engine throw the whole tree away and draw its own
     // band instead -- silently, apart from one dim line in the transcript. tsc
     // caught it; the running session would not have.
-    const cell = (bg: string, nextBg: string, fg: string, text: string) => [
-      Text({ backgroundColor: bg, color: fg, dimColor: dim, children: [` ${text} `] }),
-      Text({ backgroundColor: nextBg, color: bg, dimColor: dim, children: [''] }),
-    ]
+    const row = (parts: { fg: string; text: string }[]) =>
+      parts.flatMap((part, i) => {
+        const here = bg(i)
+        const after = i === parts.length - 1 ? undefined : bg(i + 1)
+
+        return [
+          Text({ backgroundColor: here, color: part.fg, dimColor: dim, children: [` ${part.text} `] }),
+          Text({ backgroundColor: after, color: here, dimColor: dim, children: [ICON.sep] }),
+        ]
+      })
 
     const identity = [
-      ...cell(bg(0), bg(1), BLUE, `${LABEL.folder} ${folder}`),
-      ...cell(
-        bg(1),
-        bg(2),
-        PINK,
-        (() => {
+      { fg: BLUE, text: `${ICON.folder}  ${folder}` },
+      {
+        fg: PINK,
+        text: (() => {
           // Draw the override when there is one, so the row shows what will be
-          // sent rather than what was last seen. A `*` says the mod is steering.
-          const shown = effortOverride ?? effort
-          const eff = effortBar(shown)
+          // sent rather than what was last seen.
+          const eff = effortBar(effortOverride ?? effort)
           const name = modelName(model)
-          const mark = effortOverride ? '*' : ''
-          return eff
-            ? `${LABEL.model} ${name} ${eff.bar} (${eff.letter}${mark})`
-            : `${LABEL.model} ${name}`
+
+          return eff ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter})` : `${ICON.model}  ${name}`
         })(),
-      ),
+      },
       ...(branch
-        ? cell(
-            bg(2),
-            bg(3),
-            isDirty ? AMBER : isAhead ? CYAN : GREEN,
-            `${LABEL.branch} ${branch} ${isDirty ? '\u{25CF}' : isAhead ? '^' : '\u{2713}'}`,
-          )
+        ? [
+            {
+              fg: isDirty ? AMBER : isAhead ? CYAN : GREEN,
+              text: `${ICON.branch}  ${branch} ${isDirty ? ICON.dirty : isAhead ? ICON.ahead : ICON.clean}`,
+            },
+          ]
         : []),
-      // The controls sit in a cell of their own, with a background, so they read
-      // as part of the row rather than as dim text trailing off the end of it.
-      // `plain: true` puts the key in front of the label -- `4: -` -- which is
-      // the whole point of them being here: the keys only fire from an empty
-      // prompt, so they have to be discoverable without being pressed.
-      Box({
-        backgroundColor: bg(3),
-        flexDirection: 'row',
-        columnGap: 2,
-        paddingLeft: 1,
-        paddingRight: 1,
-        children: [
-          Button({
-            key: 'effort-down',
-            label: 'less',
-            hotkey: '4',
-            plain: true,
-            dimColor: dim,
-            onPress: () => rotateEffort($, -1),
-          }),
-          Button({
-            key: 'effort-up',
-            label: 'more',
-            hotkey: '5',
-            plain: true,
-            dimColor: dim,
-            onPress: () => rotateEffort($, 1),
-          }),
-          Button({
-            key: 'legend',
-            label: 'help',
-            hotkey: '0',
-            plain: true,
-            dimColor: dim,
-            onPress: () =>
-              void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
-          }),
-        ],
-      }),
     ]
 
     // Which reading to draw. The remote one is preferred because it is the only
@@ -540,20 +501,16 @@ export const register: Register = on => {
     const gauges = [
       ...(contextPercent === null
         ? []
-        : cell(
-            bg(0),
-            bg(1),
-            barColor(contextPercent),
-            `${LABEL.context} ${bar(contextPercent)} ${contextPercent}%`,
-          )),
-      ...shown.flatMap((w, i) =>
-        cell(
-          bg(i + 1),
-          bg(i + 2),
-          barColor(w.percentUsed),
-          `${labelFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
-        ),
-      ),
+        : [
+            {
+              fg: barColor(contextPercent),
+              text: `${LABEL.context} ${bar(contextPercent)} ${contextPercent}%`,
+            },
+          ]),
+      ...shown.map(w => ({
+        fg: barColor(w.percentUsed),
+        text: `${labelFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+      })),
     ]
 
     if (identity.length === 0 && gauges.length === 0) return next(e)
@@ -561,8 +518,41 @@ export const register: Register = on => {
     return Box({
       flexDirection: 'column',
       children: [
-        Box({ flexDirection: 'row', children: identity }),
-        Box({ flexDirection: 'row', children: gauges }),
+        Box({ flexDirection: 'row', children: row(identity) }),
+        Box({ flexDirection: 'row', children: row(gauges) }),
+      ],
+    })
+  })
+
+  // The controls, moved out of the band and under the prompt, into the dim
+  // hint line the engine draws there.
+  //
+  // What that may cost: the types say a bare digit from an empty composer
+  // presses a BAND Button and only a band Button -- "never from the composer,
+  // save a bare digit in an empty one pressing a band Button". Nothing says a
+  // hint-line Button is reachable the same way. They stay clickable, and
+  // `/sl-effort <level>` sets it outright whatever the keys do. If 4 and 5 go
+  // dead here, the fix is to put this Box back at the end of the identity row.
+  //
+  // The engine's own line is drawn first, as text: a tree replaces the line
+  // rather than adding to it, so `hint` has to be carried across by hand.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if (isHidden) return next(e)
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const control = (key: string, label: string, hotkey: string, onPress: () => void) =>
+      Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
+
+    return Box({
+      flexDirection: 'row',
+      columnGap: 2,
+      children: [
+        ...(e.props.hint ? [Text({ color: MUTED, children: [e.props.hint] })] : []),
+        control('effort-down', 'less', '4', () => rotateEffort($, -1)),
+        control('effort-up', 'more', '5', () => rotateEffort($, 1)),
+        control('legend', 'help', '0', () =>
+          void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
+        ),
       ],
     })
   })
@@ -586,17 +576,17 @@ export const register: Register = on => {
       flexDirection: 'column',
       children: [
         Text({ color: BLUE, bold: true, children: ['Row one -- what this session is'] }),
-        row(`${LABEL.folder}`, 'the working directory, last segment only'),
-        row(`${LABEL.model}`, 'the model, with the effort it is sending'),
+        row(`${ICON.folder}  folder`, 'the working directory, last segment only'),
+        row(`${ICON.model}  model`, 'the model, with the effort it is sending'),
         row(
-          `${LABEL.branch}`,
-          '\u{2713} clean, \u{25CF} uncommitted changes, ^ ahead of upstream',
+          `${ICON.branch}  branch`,
+          `${ICON.clean} clean, ${ICON.dirty} uncommitted changes, ${ICON.ahead} ahead of upstream`,
         ),
         gap,
         Text({ color: BLUE, bold: true, children: ['Row two -- what it has spent'] }),
-        row(`${LABEL.context}`, 'how full the context window is'),
-        row(`${LABEL.five_hour}`, 'the five-hour window'),
-        row(`${LABEL.seven_day}`, 'the seven-day window'),
+        row(LABEL.context, 'how full the context window is'),
+        row(LABEL.five_hour, 'the five-hour window'),
+        row(LABEL.seven_day, 'the seven-day window'),
         row('fable', 'a window scoped to one model, labelled with that model'),
         row('<kind>', 'any other window the engine reports, under its own name'),
         gap,
@@ -612,11 +602,10 @@ export const register: Register = on => {
           'a different glyph from the gauges on purpose: the level you picked, not what you spent',
         ),
         row('L M H X \u{2726}', 'low, medium, high, xhigh, max'),
-        row('(H*)', 'the star means this mod is overriding it'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
-        row('4 less  5 more', 'effort down, effort up -- from an empty prompt only'),
-        row('0 help', 'open this legend; the button is clickable too'),
+        row('4 less  5 more', 'effort down, effort up -- the buttons under the prompt'),
+        row('0 help', 'open this legend; the buttons are clickable too'),
         row('/sl', 'hide or show the band'),
         row('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
         row('/sl-debug', 'print what the engine reports'),
