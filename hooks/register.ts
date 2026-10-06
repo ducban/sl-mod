@@ -101,40 +101,34 @@ const effortBar = (level: string | undefined) => {
 // it is known to render. This box does have Nerd Fonts -- 2126 of them -- and
 // JetBrains Mono reaches them through fontconfig, which is how `\u{2731}` and
 // `\u{2387}` show today although JetBrains Mono carries neither.
-const NERD = true
-const ICON = NERD
-  ? {
-      folder: '\u{F07B}', // nf-fa-folder
-      model: '\u{F1B2}', // nf-fa-cube
-      branch: '\u{E725}', // nf-dev-git_branch
-      context: '\u{25D4}', // ◔ -- a filling circle says "how full" better than any NF glyph
-      five_hour: '\u{F017}', // nf-fa-clock_o
-      seven_day: '\u{F073}', // nf-fa-calendar
-      spend_limit: '\u{F0D6}', // nf-fa-money
-      window: '\u{F02D}', // nf-fa-book, for a window this build has not named
-    }
-  : {
-      folder: '\u{25A3}', // ▣
-      model: '\u{2731}', // ✱
-      branch: '\u{2387}', // ⎇
-      context: '\u{25D4}', // ◔
-      five_hour: '\u{25F7}', // ◷
-      seven_day: '\u{25A6}', // ▦
-      spend_limit: '\u{00A4}', // ¤
-      window: '\u{2756}', // ❖
-    }
+// Labels, not icons. Nerd Font glyphs here came out visibly smaller than the
+// text beside them, and that cannot be fixed from a mod: JetBrains Mono carries
+// none of them, so each one is drawn by whichever fallback font fontconfig
+// reaches, at that font's metrics. Only a character JetBrains Mono has itself
+// renders at the same size -- it has `◔ ■ □ █ ░ │ · ✓ ●` and not `▰ ▱ ▮ ▯`.
+//
+// Short words sidestep the whole question, and they say more than a glyph does.
+const LABEL = {
+  folder: 'dir',
+  model: 'model',
+  branch: 'git',
+  context: 'ct',
+  five_hour: '5h',
+  seven_day: '7d',
+  spend_limit: 'spend',
+}
 
 // Two vocabularies for the same thing. The engine says `five_hour` and
-// `seven_day`; the endpoint says `session`, `weekly_all` and `weekly_scoped`.
-// Both are mapped, and a window with a scope takes the per-model icon whatever
-// its kind is called, so a name added later still draws.
-const iconFor = (kind: string, scope?: string | null) => {
-  if (scope) return ICON.window
-  if (kind === 'five_hour' || kind === 'session') return ICON.five_hour
-  if (kind === 'seven_day' || kind === 'weekly_all') return ICON.seven_day
-  if (kind === 'spend_limit') return ICON.spend_limit
+// `seven_day`; the usage endpoint says `session`, `weekly_all` and
+// `weekly_scoped`. A window carrying a scope is labelled with the model it is
+// scoped to, so a per-model week reads as `fable` whatever its kind is called.
+const labelFor = (kind: string, scope?: string | null) => {
+  if (scope) return scope.toLowerCase()
+  if (kind === 'five_hour' || kind === 'session') return LABEL.five_hour
+  if (kind === 'seven_day' || kind === 'weekly_all') return LABEL.seven_day
+  if (kind === 'spend_limit') return LABEL.spend_limit
 
-  return ICON.window
+  return kind
 }
 
 // --- What the drawing reads --------------------------------------------------
@@ -466,7 +460,7 @@ export const register: Register = on => {
     ]
 
     const identity = [
-      ...cell(bg(0), bg(1), BLUE, `${ICON.folder}  ${folder}`),
+      ...cell(bg(0), bg(1), BLUE, `${LABEL.folder} ${folder}`),
       ...cell(
         bg(1),
         bg(2),
@@ -479,8 +473,8 @@ export const register: Register = on => {
           const name = modelName(model)
           const mark = effortOverride ? '*' : ''
           return eff
-            ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter}${mark})`
-            : `${ICON.model}  ${name}`
+            ? `${LABEL.model} ${name} ${eff.bar} (${eff.letter}${mark})`
+            : `${LABEL.model} ${name}`
         })(),
       ),
       ...(branch
@@ -488,38 +482,47 @@ export const register: Register = on => {
             bg(2),
             bg(3),
             isDirty ? AMBER : isAhead ? CYAN : GREEN,
-            `${ICON.branch}  ${branch} ${isDirty ? '\u{25CF}' : isAhead ? '\u{21E1}' : '\u{2713}'}`,
+            `${LABEL.branch} ${branch} ${isDirty ? '\u{25CF}' : isAhead ? '^' : '\u{2713}'}`,
           )
         : []),
-      // Plain buttons, so the terminal shows the key beside the label. The
-      // hotkeys only fire from an empty prompt; typing 4 into a prompt with
-      // anything in it is just a 4.
-      Text({ children: ['  '] }),
-      Button({
-        key: 'effort-down',
-        label: '\u{2212}',
-        hotkey: '4',
-        plain: true,
-        dimColor: dim,
-        onPress: () => rotateEffort($, -1),
-      }),
-      Text({ children: [' '] }),
-      Button({
-        key: 'effort-up',
-        label: '+',
-        hotkey: '5',
-        plain: true,
-        dimColor: dim,
-        onPress: () => rotateEffort($, 1),
-      }),
-      Text({ children: ['  '] }),
-      Button({
-        key: 'legend',
-        label: '?',
-        hotkey: '0',
-        plain: true,
-        dimColor: dim,
-        onPress: () => void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
+      // The controls sit in a cell of their own, with a background, so they read
+      // as part of the row rather than as dim text trailing off the end of it.
+      // `plain: true` puts the key in front of the label -- `4: -` -- which is
+      // the whole point of them being here: the keys only fire from an empty
+      // prompt, so they have to be discoverable without being pressed.
+      Box({
+        backgroundColor: bg(3),
+        flexDirection: 'row',
+        columnGap: 2,
+        paddingLeft: 1,
+        paddingRight: 1,
+        children: [
+          Button({
+            key: 'effort-down',
+            label: 'less',
+            hotkey: '4',
+            plain: true,
+            dimColor: dim,
+            onPress: () => rotateEffort($, -1),
+          }),
+          Button({
+            key: 'effort-up',
+            label: 'more',
+            hotkey: '5',
+            plain: true,
+            dimColor: dim,
+            onPress: () => rotateEffort($, 1),
+          }),
+          Button({
+            key: 'legend',
+            label: 'help',
+            hotkey: '0',
+            plain: true,
+            dimColor: dim,
+            onPress: () =>
+              void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
+          }),
+        ],
       }),
     ]
 
@@ -537,13 +540,18 @@ export const register: Register = on => {
     const gauges = [
       ...(contextPercent === null
         ? []
-        : cell(bg(0), bg(1), FG, `${ICON.context} ${bar(contextPercent)} ${contextPercent}%`)),
+        : cell(
+            bg(0),
+            bg(1),
+            barColor(contextPercent),
+            `${LABEL.context} ${bar(contextPercent)} ${contextPercent}%`,
+          )),
       ...shown.flatMap((w, i) =>
         cell(
           bg(i + 1),
           bg(i + 2),
           barColor(w.percentUsed),
-          `${iconFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+          `${labelFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
         ),
       ),
     ]
@@ -578,21 +586,19 @@ export const register: Register = on => {
       flexDirection: 'column',
       children: [
         Text({ color: BLUE, bold: true, children: ['Row one -- what this session is'] }),
-        row(`${ICON.folder}  folder`, 'the working directory, last segment only'),
-        row(`${ICON.model}  model`, 'the model, with the effort it is sending'),
+        row(`${LABEL.folder}`, 'the working directory, last segment only'),
+        row(`${LABEL.model}`, 'the model, with the effort it is sending'),
         row(
-          `${ICON.branch}  branch`,
-          '\u{2713} clean, \u{25CF} uncommitted changes, \u{21E1} ahead of upstream',
+          `${LABEL.branch}`,
+          '\u{2713} clean, \u{25CF} uncommitted changes, ^ ahead of upstream',
         ),
         gap,
         Text({ color: BLUE, bold: true, children: ['Row two -- what it has spent'] }),
-        row(`${ICON.context} context`, 'how full the context window is'),
-        row(`${ICON.five_hour} session`, 'the five-hour window'),
-        row(`${ICON.seven_day} week`, 'the seven-day window'),
-        row(
-          `${ICON.window} other`,
-          'any window this build reports that the mod has no icon for',
-        ),
+        row(`${LABEL.context}`, 'how full the context window is'),
+        row(`${LABEL.five_hour}`, 'the five-hour window'),
+        row(`${LABEL.seven_day}`, 'the seven-day window'),
+        row('fable', 'a window scoped to one model, labelled with that model'),
+        row('<kind>', 'any other window the engine reports, under its own name'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
         row('\u{25B0}\u{25B1}\u{25B1}\u{25B1}\u{25B1}  1-20%', 'five segments of 20%, rounded UP'),
@@ -609,8 +615,8 @@ export const register: Register = on => {
         row('(H*)', 'the star means this mod is overriding it'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
-        row('4   5', 'effort down, effort up -- from an empty prompt only'),
-        row('0   ?', 'open this legend'),
+        row('4 less  5 more', 'effort down, effort up -- from an empty prompt only'),
+        row('0 help', 'open this legend; the button is clickable too'),
         row('/sl', 'hide or show the band'),
         row('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
         row('/sl-debug', 'print what the engine reports'),

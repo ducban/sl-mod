@@ -51,4 +51,25 @@ pass under `claude plugin test`.
 ```bash
 claude --plugin-dir ~/Workspace/Projects/personal_works/sl-mod
 claude plugin validate ~/Workspace/Projects/personal_works/sl-mod
+claude plugin test ~/Workspace/Projects/personal_works/sl-mod
 ```
+
+The old `statusLine` command was removed from `~/.claude/settings.json` on
+2026-10-06 so the band is the only status line in the window. To put
+`claude-powerline` back, the block was:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "claude-powerline --config=~/.claude/powerline-config.json",
+  "padding": 0
+},
+```
+
+## Why labels and not icons
+
+Nerd Font glyphs drew visibly smaller than the text beside them, and a mod can't
+fix that. JetBrains Mono carries none of them, so each is drawn by whichever
+fallback font fontconfig reaches, at that font's metrics. It has `◔ ■ □ █ ░ │ ·
+✓ ●` and not `▰ ▱ ▮ ▯`. Short words avoid the question and say more than a glyph
+does: `ct`, `5h`, `7d`, and the model's own name for a scoped window.

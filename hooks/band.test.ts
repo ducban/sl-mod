@@ -125,7 +125,8 @@ test('the band stands aside for a survey', async ($, on) => {
 // No running session shows these clearly: a bar that is absent looks the same
 // whether the data was missing or the code was wrong.
 
-const BOOK = '\u{F02D}' // the per-model window's icon
+// A window scoped to a model is labelled with the model, lowercased.
+const SCOPED = 'fable'
 
 const reply = () =>
   JSON.stringify({
@@ -173,7 +174,7 @@ test('with no credential to spend, the live windows stay and nothing is invented
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(SCOPED) })).toBeUndefined()
 
   await ui.unmount()
 })
@@ -185,7 +186,7 @@ test('a fresh reading adds the per-model week', async ($, on) => {
   await $.classic.SessionStart({ source: 'startup' })
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
-  expect(await ui.find({ type: 'Text', text: new RegExp(`${BOOK}.*26%`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`${SCOPED}.*26%`) })).toBeDefined()
   // The endpoint's own figure wins over the engine's for the week, so the row
   // comes from one reading rather than two that disagree.
   expect(await ui.find({ type: 'Text', text: /39%/ })).toBeDefined()
@@ -201,7 +202,7 @@ test('a 401 keeps the live windows rather than blanking the row', async ($, on) 
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
 
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(SCOPED) })).toBeUndefined()
 
   await ui.unmount()
 })
