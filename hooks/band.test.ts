@@ -49,6 +49,10 @@ const stand = (
   now?: number,
   usage?: SessionUsage | (() => SessionUsage),
   hasVersionFile = true,
+  // Every `$.ui.open` the mod makes, in order, for the tabs test. A second
+  // `on('ui.open')` in the test body fails the whole module load with
+  // `on("ui.open") registered twice`, so the recorder has to live in here.
+  opens?: { id: string; focus: boolean }[],
 ) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
@@ -78,7 +82,11 @@ const stand = (
   on('fs.exists', ($, e) => ({ value: hasVersionFile && e.path.endsWith('plugin.json') }))
   // `fs.read` answers the text itself, not an object wrapping it.
   on('fs.read', () => ({ value: '{"name":"sl-mod","version":"0.1.0"}' }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', ($, e) => {
+    opens?.push({ id: e.id, focus: e.focus === true })
+
+    return { value: { isPlaced: true } }
+  })
   // Dispatched on the command, because the mod runs two different ones and they
   // answer differently here: a clean branch in the --porcelain=v2 shape
   // refreshGit parses, and a repo with no tags -- `git describe` exiting 1,
@@ -428,4 +436,37 @@ test('a compaction drops the context gauge instead of pinning the old number', a
   expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
 
   await ui.unmount()
+})
+
+// The tabs are the engine's: it draws no title for a lone pane and a tab strip
+// as soon as a second is open. So what the mod owes is opening both, and
+// raising the one asked for -- which `focus: true` does, and which is why the
+// order matters.
+test('a /sl-* command opens both panes, so the engine draws them as tabs', async ($, on) => {
+  const opens: { id: string; focus: boolean }[] = []
+  stand(on, undefined, undefined, true, opens)
+
+  // On `$` inside a test, `command.run` is the event call, not the plugin-side
+  // shorthand: it wants the whole input, the two the engine would stamp
+  // included.
+  const run = (command: string) =>
+    $.command.run({
+      command,
+      args: '',
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: false, columns: 120 },
+    })
+
+  await run('sl-help')
+  expect(opens).toEqual([
+    { id: 'sl-settings', focus: false },
+    { id: 'sl-legend', focus: true },
+  ])
+
+  opens.length = 0
+  await run('sl-settings')
+  expect(opens).toEqual([
+    { id: 'sl-legend', focus: false },
+    { id: 'sl-settings', focus: true },
+  ])
 })

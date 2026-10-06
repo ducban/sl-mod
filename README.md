@@ -65,12 +65,26 @@ on. The backstop and its guard are tested.
 ## State
 
 Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
-`/sl-effort` and `/sl-debug` work. Thirteen tests pass under `claude plugin test`,
+`/sl-effort` and `/sl-debug` work. Fourteen tests pass under `claude plugin test`,
 `tsc -p .` is clean and `claude plugin validate` passes.
 
 Every polled figure carries a note saying why it has nothing, and `/sl-debug`
 prints it. An empty cell looks identical whether the probe answered "no branch"
 or threw on the way to asking, and that silence has cost time here before.
+
+## Help and settings are tabs
+
+Nothing was built for this. The engine draws no title for a lone pane and a tab
+strip the moment a second one is open -- `PaneOpenArgs.title` says so outright:
+"The pane's tab while more than one pane is open (with one, no title is drawn)",
+and the `Pane` render event: "one shown, the rest tabs".
+
+So `/sl-help` and `/sl-settings` each open both panes and raise their own.
+`focus: true` raises as well as focuses, which is why the asked-for pane is
+opened last. A click on the other tab shows it, or Tab onto it and Enter.
+
+`/sl-debug` stays text. It is a dump meant to be selected and pasted somewhere,
+and a pane body cannot be copied out.
 
 ## The hint line, and why nothing is drawn there now
 

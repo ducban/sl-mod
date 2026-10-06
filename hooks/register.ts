@@ -250,6 +250,25 @@ const tk = (n: number) =>
 const LEGEND = 'sl-legend'
 const SETTINGS = 'sl-settings'
 
+// The engine draws no title for a lone pane and a tab strip the moment a second
+// one is open -- "one shown, the rest tabs" (PaneOpenArgs.title). So the tabs
+// are not a widget to build: they are what two open panes already look like.
+// Every /sl-* command that has a pane opens both and raises its own, which is
+// why `show` is opened last: `focus: true` raises as well as focuses.
+const PANES: { id: string; title: string }[] = [
+  { id: LEGEND, title: 'sl help' },
+  { id: SETTINGS, title: 'sl settings' },
+]
+
+async function openTabs($: EngineInterface, show: string) {
+  for (const pane of PANES) {
+    if (pane.id === show) continue
+    await $.ui.open({ id: pane.id, title: pane.title, closeOnEscape: true })
+  }
+  const front = PANES.find(pane => pane.id === show)
+  if (front) await $.ui.open({ ...front, focus: true, closeOnEscape: true })
+}
+
 // --- Where the windows come from --------------------------------------------
 // The engine hands a mod two windows, `five_hour` and `seven_day`. The per-model
 // week -- "Current week (Fable)" in /usage -- reaches neither a mod nor the
@@ -817,13 +836,13 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'sl-help' }, async $ => {
-    await $.ui.open({ id: LEGEND, title: 'sl help', focus: true, closeOnEscape: true })
+    await openTabs($, LEGEND)
 
     return {}
   })
 
   on('command.run', { command: 'sl-settings' }, async $ => {
-    await $.ui.open({ id: SETTINGS, title: 'sl settings', focus: true, closeOnEscape: true })
+    await openTabs($, SETTINGS)
 
     return {}
   })
@@ -1010,7 +1029,10 @@ export const register: Register = on => {
               plain: true,
               onPress: () => void resetLayout($),
             }),
-            Text({ color: MUTED, children: [`${ICON.dot} esc closes ${ICON.dot} /sl-help for the legend`] }),
+            Text({
+              color: MUTED,
+              children: [`${ICON.dot} esc closes ${ICON.dot} tab to the sl help tab and enter, or click it`],
+            }),
           ],
         }),
       ],
@@ -1060,7 +1082,8 @@ export const register: Register = on => {
         line('/sl', 'hide or show the band'),
         line('/sl-settings', 'choose what shows, and on which line'),
         line('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
-        line('/sl-debug', 'print what the engine reports'),
+        line('/sl-debug', 'print what the engine reports -- text, so it can be copied out'),
+        line('tabs', 'help and settings open together; click a tab, or tab onto it and enter'),
         line('Esc', 'close this pane'),
         gap,
         Text({
