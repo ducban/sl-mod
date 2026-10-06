@@ -44,7 +44,7 @@ const SURFACES = ['terminal', 'desktop'] as const
 // Nothing sits beneath the plugin in a test, so the test is the engine: every
 // call the mod makes has to be answered here or its hook is skipped. `mock`
 // covers clock, store and env; the rest is spelled out.
-const stand = (on: On, now?: number, usage?: SessionUsage) => {
+const stand = (on: On, now?: number, usage?: SessionUsage, hasVersionFile = true) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
   // load with `on("clock.now") registered twice`.
@@ -70,20 +70,27 @@ const stand = (on: On, now?: number, usage?: SessionUsage) => {
   // Matched by suffix: the engine may resolve the relative path before the
   // event is raised, so an equality check on the spelling the mod passed is not
   // safe.
-  on('fs.exists', ($, e) => ({ value: e.path.endsWith('plugin.json') }))
+  on('fs.exists', ($, e) => ({ value: hasVersionFile && e.path.endsWith('plugin.json') }))
   // `fs.read` answers the text itself, not an object wrapping it.
   on('fs.read', () => ({ value: '{"name":"sl-mod","version":"0.1.0"}' }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  // A clean branch, in the --porcelain=v2 shape refreshGit parses.
-  on('process.run', () => ({
-    value: {
-      exitCode: 0,
-      stdout: '# branch.head main\n# branch.ab +0 -0\n',
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
+  // Dispatched on the command, because the mod runs two different ones and they
+  // answer differently here: a clean branch in the --porcelain=v2 shape
+  // refreshGit parses, and a repo with no tags -- `git describe` exiting 1,
+  // which is what both of these repos actually do.
+  on('process.run', ($, e) => {
+    const isStatus = e.argv[1] === 'status'
+
+    return {
+      value: {
+        exitCode: isStatus ? 0 : 128,
+        stdout: isStatus ? '# branch.head main\n# branch.ab +0 -0\n' : '',
+        stderr: isStatus ? '' : 'fatal: No names found, cannot describe anything.',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }
+  })
   // The bottom of the render chain. It has to be what the engine resolves to at
   // a site it draws itself -- `{ type: 'engine', ref }`. Returning null is
   // refused with "returned something that is not a tree element", and then the
@@ -356,6 +363,25 @@ test('the cache cell says nothing while the cache is healthy', async ($, on) => 
 
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: /ch \d+%/ })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('a repo with no version does not take the git cell down with it', async ($, on) => {
+  // The version probe used to run `git describe` unguarded, between the git
+  // refresh and the timers, inside a GATING hook -- `claude plugin validate`
+  // warned about that in as many words and it was ignored. A repo with no tags
+  // was enough to leave session.start without its poll and without next(e).
+  // Nothing on disk declares a version, so the probe falls all the way through
+  // to `git describe`. Passed to `stand`: a second on('fs.exists') here fails
+  // the module load outright.
+  stand(on, undefined, undefined, false)
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  expect(await ui.find({ type: 'Text', text: /main/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0\.1\.0/ })).toBeUndefined()
 
   await ui.unmount()
 })

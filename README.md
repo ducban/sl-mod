@@ -45,8 +45,12 @@ number.
 ## State
 
 Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
-`/sl-effort` and `/sl-debug` work. Eleven tests pass under `claude plugin test`,
+`/sl-effort` and `/sl-debug` work. Twelve tests pass under `claude plugin test`,
 `tsc -p .` is clean and `claude plugin validate` passes.
+
+Every polled figure carries a note saying why it has nothing, and `/sl-debug`
+prints it. An empty cell looks identical whether the probe answered "no branch"
+or threw on the way to asking, and that silence has cost time here before.
 
 ## The hint line, and why nothing is drawn there now
 
@@ -136,6 +140,9 @@ is not on every machine.
 order: `package.json`, `.claude-plugin/plugin.json`, `pyproject.toml`,
 `Cargo.toml`, then `git describe --tags`. Nothing found means no cell — `⌂ ?`
 says less than nothing does.
+
+`dotfiles/arch` declares no version and has no tags, so it draws no cell. That
+is the intended answer, not a failure — `/sl-debug` spells out which it is.
 
 A version from a git tag gets `+N` when HEAD has moved past it, because then the
 thing running is not the thing the tag names. A version from a file gets no

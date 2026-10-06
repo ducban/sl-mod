@@ -206,6 +206,11 @@ let isDirty = false
 let isAhead = false
 let isHidden = false
 let projectVersion: string | null = null
+// Why each polled figure has nothing, in words. An empty cell looks identical
+// whether the probe answered "no branch" or threw on its way to asking, and
+// this repo has been caught out by that kind of silence more than once.
+let gitNote = 'not probed yet'
+let versionNote = 'not probed yet'
 
 // The rotate keys and `/sl-effort` set this, and nothing else does. While it is
 // null the `turn.step` hook passes every request through untouched, so the band
@@ -388,6 +393,7 @@ async function refreshVersion($: EngineInterface) {
       const found = source.read(await $.fs.read(source.path))
       if (found) {
         projectVersion = found
+        versionNote = `from ${source.path}`
 
         return
       }
@@ -397,28 +403,50 @@ async function refreshVersion($: EngineInterface) {
     }
   }
 
-  const tag = await $.process.run(['git', 'describe', '--tags', '--abbrev=0'], { timeoutMs: 3000 })
-  if (tag.exitCode !== 0) {
-    projectVersion = null
+  // Guarded, all of it. These two were bare, and a throw here left `session.start`
+  // without its timers and without `next(e)` -- so one repo with no tags could
+  // take the git poll down with it and leave no trace but a dim transcript line.
+  try {
+    const tag = await $.process.run(['git', 'describe', '--tags', '--abbrev=0'], { timeoutMs: 3000 })
+    if (tag.exitCode !== 0) {
+      projectVersion = null
+      versionNote = 'no version file, and no tag to describe'
 
-    return
+      return
+    }
+    const name = tag.stdout.trim()
+    const since = await $.process.run(['git', 'rev-list', '--count', `${name}..HEAD`], {
+      timeoutMs: 3000,
+    })
+    const ahead = since.exitCode === 0 ? Number(since.stdout.trim()) : 0
+    projectVersion = ahead > 0 ? `${name}+${ahead}` : name
+    versionNote = `from git describe${ahead > 0 ? `, ${ahead} commit(s) past it` : ''}`
+  } catch (err) {
+    projectVersion = null
+    versionNote = `git describe threw: ${String(err).slice(0, 80)}`
   }
-  const name = tag.stdout.trim()
-  const since = await $.process.run(['git', 'rev-list', '--count', `${name}..HEAD`], {
-    timeoutMs: 3000,
-  })
-  const ahead = since.exitCode === 0 ? Number(since.stdout.trim()) : 0
-  projectVersion = ahead > 0 ? `${name}+${ahead}` : name
 }
 
 async function refreshGit($: EngineInterface) {
   // `--porcelain=v2 --branch` answers all three questions in one call: the
   // branch name, whether anything is modified, and how far ahead of upstream.
-  const { exitCode, stdout } = await $.process.run(['git', 'status', '--porcelain=v2', '--branch'], {
-    timeoutMs: 3000,
-  })
+  let exitCode: number
+  let stdout: string
+  try {
+    const run = await $.process.run(['git', 'status', '--porcelain=v2', '--branch'], {
+      timeoutMs: 3000,
+    })
+    exitCode = run.exitCode
+    stdout = run.stdout
+  } catch (err) {
+    branch = null
+    gitNote = `git status threw: ${String(err).slice(0, 80)}`
+
+    return
+  }
   if (exitCode !== 0) {
     branch = null
+    gitNote = `git status exited ${exitCode}`
 
     return
   }
@@ -429,6 +457,7 @@ async function refreshGit($: EngineInterface) {
   isDirty = lines.some(l => /^[12u?] /.test(l))
   const ab = lines.find(l => l.startsWith('# branch.ab '))
   isAhead = ab ? Number(ab.split(' ')[2] ?? '+0') > 0 : false
+  gitNote = branch === null ? 'no branch.head line, or detached' : 'ok'
 }
 
 // The four token counts of the last response, which is the only place a mod can
@@ -650,18 +679,23 @@ export const register: Register = on => {
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = usage.cost?.usd ?? null
 
-    await refreshGit($)
-    await refreshVersion($)
+    // Timers FIRST, then the probes. The other way round, a probe that threw
+    // left this hook without its timers and without `next(e)`: `session.start`
+    // is a gating hook, which `claude plugin validate` says in as many words,
+    // and one repo with no tags was enough to take the git poll down with it.
+    //
     // Git is the one figure nothing pushes, so it is what gets polled -- off the
-    // draw path, where its cost does not show. The version rides the same timer
-    // but far more slowly: it changes when someone edits package.json.
+    // draw path, where its cost does not show. The version rides a slower timer:
+    // it changes when someone edits package.json.
     $.clock.every(5000, () => void refreshGit($))
     $.clock.every(60_000, () => void refreshVersion($))
-
     // Off the draw path, always: a network call must never sit between a
     // keystroke and a frame.
-    void refreshUsage($)
     $.clock.every(POLL_MS, () => void refreshUsage($))
+
+    void refreshGit($)
+    void refreshVersion($)
+    void refreshUsage($)
 
     return next(e)
   })
@@ -675,6 +709,10 @@ export const register: Register = on => {
     contextPercent = usage.context.percent ?? null
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = usage.cost?.usd ?? null
+    // Awaited here, not fired and forgotten: this is the only event a test can
+    // raise, so the probes have to have finished before the test looks. Each one
+    // swallows its own failure, which is what makes awaiting them safe in a
+    // gating hook.
     await refreshGit($)
     await refreshVersion($)
     await refreshUsage($)
@@ -779,8 +817,8 @@ export const register: Register = on => {
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,
         `effort override: ${effortOverride ?? 'none'}`,
-        `git: branch=${branch} dirty=${isDirty} ahead=${isAhead}`,
-        `project version: ${projectVersion ?? 'none found'}`,
+        `git: branch=${branch} dirty=${isDirty} ahead=${isAhead} -- ${gitNote}`,
+        `project version: ${projectVersion ?? 'none found'} -- ${versionNote}`,
         `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `usage endpoint: ${reading.windows.length} window(s)`,
