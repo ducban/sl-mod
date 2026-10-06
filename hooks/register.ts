@@ -137,12 +137,39 @@ const iconFor = (kind: string) =>
 // Module-level, so a redraw costs nothing. They go back to their defaults when
 // the module reloads, and each is filled again by the hook that owns it.
 type Window = { kind: string; percentUsed: number }
+type Effort = (typeof EFFORT_STEPS)[number]
 let contextPercent: number | null = null
 let windows: Window[] = []
 let effort: string | undefined
 let branch: string | null = null
 let isDirty = false
 let isAhead = false
+let isHidden = false
+
+// The rotate keys set this, and nothing else does. While it is null the
+// `turn.step` hook passes every request through untouched, so the band starts
+// out reporting the session's own effort rather than quietly steering it. Only
+// once the user has pressed a key does this mod have an opinion -- which also
+// means it cannot fight a change made through `/model` or the thinking toggle
+// until asked to.
+let effortOverride: Effort | null = null
+
+const PANE = 'sl-legend'
+
+// A digit is the only key that reaches a band Button without the band having
+// keyboard focus, and only from an empty prompt -- every letter goes to the
+// composer. So the rotate keys are digits, and 1-3 are left free for tabs.
+//
+// Declared up here, not inside `register`: `claude plugin validate` follows `$`
+// only into a function declared at the top of the file, and refuses a closure
+// it cannot trace. tsc was happy with it either way.
+function rotateEffort($: EngineInterface, by: number) {
+  const from = effortOverride ?? (effort as Effort | undefined) ?? 'medium'
+  const at = EFFORT_STEPS.indexOf(from)
+  const to = EFFORT_STEPS[Math.min(EFFORT_STEPS.length - 1, Math.max(0, at + by))]
+  if (to) effortOverride = to
+  $.ui.invalidate('ui.render')
+}
 
 async function refreshGit($: EngineInterface) {
   // `--porcelain=v2 --branch` answers all three questions in one call: the
@@ -166,10 +193,19 @@ async function refreshGit($: EngineInterface) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'sl-debug',
-      description: 'Print the raw session usage the status line reads',
-    })
+    for (const [name, description] of [
+      ['sl', 'Show or hide the status line band'],
+      ['sl-help', 'Open the status line legend'],
+      ['sl-effort', 'Set reasoning effort: low, medium, high, xhigh, max, or off'],
+      ['sl-debug', 'Print the raw session usage the status line reads'],
+    ] as const) {
+      await $.command.register({ name, description })
+    }
+
+    // Hiding the band is a preference, so it outlives the session. `$.store` is
+    // shared by every session on the machine, which is what is wanted here: the
+    // band is either something you want above your prompt or it is not.
+    isHidden = (await $.store.get('isHidden')) === true
 
     // The first reading, before any measurement has been pushed.
     const usage = await $.session.usage()
@@ -199,7 +235,43 @@ export const register: Register = on => {
   // shows afterwards is the effort actually sent, after any silent downgrade.
   on('turn.step', async function* ($, e, next) {
     if (typeof e.effort === 'string') effort = e.effort
+    if (effortOverride !== null && effortOverride !== e.effort) {
+      yield* next({ ...e, effort: effortOverride })
+
+      return
+    }
     yield* next(e)
+  })
+
+  on('command.run', { command: 'sl' }, async $ => {
+    isHidden = !isHidden
+    await $.store.set('isHidden', isHidden)
+    $.ui.invalidate('ui.render')
+
+    return { text: isHidden ? 'Status line hidden. `/sl` brings it back.' : 'Status line shown.' }
+  })
+
+  on('command.run', { command: 'sl-help' }, async $ => {
+    await $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true })
+
+    return {}
+  })
+
+  on('command.run', { command: 'sl-effort' }, async ($, e) => {
+    const asked = (e.args ?? '').trim().toLowerCase()
+    if (asked === 'off' || asked === 'reset') {
+      effortOverride = null
+      $.ui.invalidate('ui.render')
+
+      return { text: 'Effort override cleared; the session decides again.' }
+    }
+    if (!EFFORT_STEPS.includes(asked as Effort)) {
+      return { text: `Effort is one of ${EFFORT_STEPS.join(', ')}, or off to stop overriding.` }
+    }
+    effortOverride = asked as Effort
+    $.ui.invalidate('ui.render')
+
+    return { text: `Effort set to ${asked} for the requests this session sends from now on.` }
   })
 
   on('command.run', { command: 'sl-debug' }, async $ => {
@@ -220,9 +292,9 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // A survey owns the band while it is up; stand aside rather than fight it.
-    if (e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey || isHidden) return next(e)
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const cwd = await $.session.cwd()
     const folder = cwd.replace(/\/+$/, '').split('/').pop() || '/'
     const model = await $.session.model()
@@ -249,10 +321,14 @@ export const register: Register = on => {
         bg(2),
         PINK,
         (() => {
-          const eff = effortBar(effort)
+          // Draw the override when there is one, so the row shows what will be
+          // sent rather than what was last seen. A `*` says the mod is steering.
+          const shown = effortOverride ?? effort
+          const eff = effortBar(shown)
           const name = modelName(model)
+          const mark = effortOverride ? '*' : ''
           return eff
-            ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter})`
+            ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter}${mark})`
             : `${ICON.model}  ${name}`
         })(),
       ),
@@ -264,6 +340,36 @@ export const register: Register = on => {
             `${ICON.branch}  ${branch} ${isDirty ? '\u{25CF}' : isAhead ? '\u{21E1}' : '\u{2713}'}`,
           )
         : []),
+      // Plain buttons, so the terminal shows the key beside the label. The
+      // hotkeys only fire from an empty prompt; typing 4 into a prompt with
+      // anything in it is just a 4.
+      Text({ children: ['  '] }),
+      Button({
+        key: 'effort-down',
+        label: '\u{2212}',
+        hotkey: '4',
+        plain: true,
+        dimColor: dim,
+        onPress: () => rotateEffort($, -1),
+      }),
+      Text({ children: [' '] }),
+      Button({
+        key: 'effort-up',
+        label: '+',
+        hotkey: '5',
+        plain: true,
+        dimColor: dim,
+        onPress: () => rotateEffort($, 1),
+      }),
+      Text({ children: ['  '] }),
+      Button({
+        key: 'legend',
+        label: '?',
+        hotkey: '0',
+        plain: true,
+        dimColor: dim,
+        onPress: () => void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
+      }),
     ]
 
     // Every gauge means the same thing -- how much of an allowance is gone --
@@ -289,6 +395,74 @@ export const register: Register = on => {
       children: [
         Box({ flexDirection: 'row', children: identity }),
         Box({ flexDirection: 'row', children: gauges }),
+      ],
+    })
+  })
+
+  // The legend. A pane rather than a toast: a toast is gone in four seconds and
+  // this is a page to read. Esc closes it, and it is drawn from the same values
+  // the band uses, so it cannot describe a row the band is not showing.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const row = (left: string, right: string) =>
+      Box({
+        flexDirection: 'row',
+        children: [
+          Text({ color: FG, children: [left.padEnd(22)] }),
+          Text({ color: MUTED, wrap: 'wrap', children: [right] }),
+        ],
+      })
+    const gap = Text({ children: [' '] })
+
+    return Box({
+      flexDirection: 'column',
+      children: [
+        Text({ color: BLUE, bold: true, children: ['Row one -- what this session is'] }),
+        row(`${ICON.folder}  folder`, 'the working directory, last segment only'),
+        row(`${ICON.model}  model`, 'the model, with the effort it is sending'),
+        row(
+          `${ICON.branch}  branch`,
+          '\u{2713} clean, \u{25CF} uncommitted changes, \u{21E1} ahead of upstream',
+        ),
+        gap,
+        Text({ color: BLUE, bold: true, children: ['Row two -- what it has spent'] }),
+        row(`${ICON.context} context`, 'how full the context window is'),
+        row(`${ICON.five_hour} session`, 'the five-hour window'),
+        row(`${ICON.seven_day} week`, 'the seven-day window'),
+        row(
+          `${ICON.window} other`,
+          'any window this build reports that the mod has no icon for',
+        ),
+        gap,
+        Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
+        row('\u{25B0}\u{25B1}\u{25B1}\u{25B1}\u{25B1}  1-20%', 'five segments of 20%, rounded UP'),
+        row('\u{25B0}\u{25B0}\u{25B1}\u{25B1}\u{25B1}  21-40%', 'so 19% shows one segment, never none'),
+        row('\u{25B0}\u{25B0}\u{25B0}\u{25B0}\u{25B0}  81-100%', 'a quota must not read lower than it is'),
+        row('colour', 'green under 60%, amber from 60, red from 85'),
+        gap,
+        Text({ color: BLUE, bold: true, children: ['Effort'] }),
+        row(
+          '\u{25AE}\u{25AE}\u{25AF}\u{25AF}\u{25AF} (M)',
+          'a different glyph from the gauges on purpose: the level you picked, not what you spent',
+        ),
+        row('L M H X \u{2726}', 'low, medium, high, xhigh, max'),
+        row('(H*)', 'the star means this mod is overriding it'),
+        gap,
+        Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
+        row('4   5', 'effort down, effort up -- from an empty prompt only'),
+        row('0   ?', 'open this legend'),
+        row('/sl', 'hide or show the band'),
+        row('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
+        row('/sl-debug', 'print what the engine reports'),
+        row('Esc', 'close this pane'),
+        gap,
+        Text({
+          color: MUTED,
+          wrap: 'wrap',
+          children: [
+            'Effort is blank until the first model request: the engine does not hand a mod the session setting, only what each request carries.',
+          ],
+        }),
       ],
     })
   })
