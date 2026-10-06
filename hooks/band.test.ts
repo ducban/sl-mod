@@ -143,19 +143,26 @@ const reply = () =>
 
 const endpoint = (
   on: On,
-  opts: { auth?: boolean; body?: string; status?: number },
+  opts: { auth?: boolean; body?: string; status?: number; headers?: Record<string, string> },
 ) => {
+  let calls = 0
   on('session.authorize', () =>
     opts.auth === false ? { value: null } : { value: { handle: 'h', kind: 'bearer' as const } },
   )
-  on('http.fetch', () => ({
-    value: {
-      status: opts.status ?? 200,
-      ok: (opts.status ?? 200) < 400,
-      headers: {},
-      text: opts.body ?? '',
-    },
-  }))
+  on('http.fetch', () => {
+    calls += 1
+
+    return {
+      value: {
+        status: opts.status ?? 200,
+        ok: (opts.status ?? 200) < 400,
+        headers: opts.headers ?? {},
+        text: opts.body ?? '',
+      },
+    }
+  })
+
+  return { calls: () => calls }
 }
 
 test('with no credential to spend, the live windows stay and nothing is invented', async ($, on) => {
@@ -196,5 +203,27 @@ test('a 401 keeps the live windows rather than blanking the row', async ($, on) 
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
 
+  await ui.unmount()
+})
+
+test('a 429 stops the polling instead of hammering a limited endpoint', async ($, on) => {
+  stand(on, Date.parse('2026-10-06T12:00:00Z'))
+  const seen = endpoint(on, {
+    status: 429,
+    headers: { 'retry-after': '600' },
+    body: '{"error":"rate_limited"}',
+  })
+
+  // One refresh on the way in.
+  await $.classic.SessionStart({ source: 'startup' })
+  expect(seen.calls()).toBe(1)
+
+  // A second refresh inside the window must not reach the network at all.
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(seen.calls()).toBe(1)
+
+  // And the band still shows the engine's live windows meanwhile.
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
   await ui.unmount()
 })

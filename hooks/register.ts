@@ -188,7 +188,26 @@ type Reading = {
 }
 let reading: Reading = { windows: [], at: null, note: 'not fetched yet' }
 
+// Anthropic rate-limits this endpoint, and this mod is not the only caller: ccuc
+// polls the same account from three machines every five minutes, and a mod runs
+// on each machine with Claude Code open. So a 429 has to mean stop, not try again
+// in three minutes. Nothing is attempted before this time.
+let nextAllowedAt = 0
+// A 429 with no Retry-After, or one asking for something unreasonable.
+const DEFAULT_BACKOFF_MS = 10 * 60_000
+const MAX_BACKOFF_MS = 60 * 60_000
+
 async function refreshUsage($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now < nextAllowedAt) {
+    reading = {
+      ...reading,
+      note: `backing off for ${Math.ceil((nextAllowedAt - now) / 1000)}s more`,
+    }
+
+    return
+  }
+
   let auth
   try {
     auth = await $.session.authorize()
@@ -216,6 +235,18 @@ async function refreshUsage($: EngineInterface) {
     return
   }
   if (!res.ok) {
+    if (res.status === 429) {
+      // Retry-After is seconds or an HTTP date; take seconds and sanity-bound it,
+      // since a header asking for a week would silence the row until a restart.
+      const asked = Number(res.headers['retry-after'] ?? res.headers['Retry-After'])
+      const wait = Number.isFinite(asked) && asked > 0
+        ? Math.min(asked * 1000, MAX_BACKOFF_MS)
+        : DEFAULT_BACKOFF_MS
+      nextAllowedAt = now + wait
+      reading = { ...reading, note: `rate limited, waiting ${Math.round(wait / 1000)}s` }
+
+      return
+    }
     reading = { ...reading, note: `http ${res.status}` }
 
     return
@@ -246,9 +277,10 @@ async function refreshUsage($: EngineInterface) {
 
   // An empty array means the account has no window to report. Drawing zeroes
   // would be inventing them, so nothing is drawn.
+  nextAllowedAt = 0
   reading = {
     windows,
-    at: windows.length > 0 ? await $.clock.now() : null,
+    at: windows.length > 0 ? now : null,
     note: windows.length > 0 ? '' : 'the body carried no windows',
   }
 }
