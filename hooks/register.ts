@@ -55,6 +55,28 @@ const EFFORT_LETTER: Record<string, string> = {
   xhigh: 'X',
   max: '✦',
 }
+// `$.session.model()` answers the id, `claude-opus-5`. The display name lives
+// in the status line payload, which a mod never sees, so the names are here.
+// Anything unmapped is derived rather than printed raw: drop `claude-`, drop a
+// trailing date, title-case the family and join the version with a dot, so a
+// model added after this was written still reads as a name.
+const MODEL_NAME: Record<string, string> = {
+  'claude-opus-5': 'Opus 5',
+  'claude-opus-5-5': 'Opus 5.5',
+  'claude-fable-5-1': 'Fable 5.1',
+  'claude-sonnet-5': 'Sonnet 5',
+  'claude-haiku-4-5-20251001': 'Haiku 4.5',
+}
+const modelName = (id: string) => {
+  const known = MODEL_NAME[id]
+  if (known) return known
+  const parts = id.replace(/^claude-/, '').replace(/-\d{8}$/, '').split('-')
+  const family = parts.shift() ?? id
+  const version = parts.join('.')
+  const titled = family.charAt(0).toUpperCase() + family.slice(1)
+  return version ? `${titled} ${version}` : titled
+}
+
 const effortBar = (level: string | undefined) => {
   if (!level) return null
   const step = EFFORT_STEPS.indexOf(level as (typeof EFFORT_STEPS)[number]) + 1
@@ -71,12 +93,45 @@ const effortBar = (level: string | undefined) => {
 // `spend_limit`; the 2.1.289 binary carries nine, and `/usage` shows a
 // per-model week that neither this API nor the status line payload passes on.
 // So a hardcoded pair would silently drop whatever is added next.
-const KIND_ICON: Record<string, string> = {
-  five_hour: '',
-  seven_day: '',
-  spend_limit: '',
-}
-const iconFor = (kind: string) => KIND_ICON[kind] ?? ''
+// Written as escapes, not as the characters themselves: the glyphs were lost
+// in transit the first time and every icon came out as an empty string.
+//
+// NERD is false for a box that has no Nerd Font. The fallback set is plain
+// Unicode, and the same glyphs the old status line was already drawing here, so
+// it is known to render. This box does have Nerd Fonts -- 2126 of them -- and
+// JetBrains Mono reaches them through fontconfig, which is how `\u{2731}` and
+// `\u{2387}` show today although JetBrains Mono carries neither.
+const NERD = true
+const ICON = NERD
+  ? {
+      folder: '\u{F07B}', // nf-fa-folder
+      model: '\u{F1B2}', // nf-fa-cube
+      branch: '\u{E725}', // nf-dev-git_branch
+      context: '\u{25D4}', // ◔ -- a filling circle says "how full" better than any NF glyph
+      five_hour: '\u{F017}', // nf-fa-clock_o
+      seven_day: '\u{F073}', // nf-fa-calendar
+      spend_limit: '\u{F0D6}', // nf-fa-money
+      window: '\u{F02D}', // nf-fa-book, for a window this build has not named
+    }
+  : {
+      folder: '\u{25A3}', // ▣
+      model: '\u{2731}', // ✱
+      branch: '\u{2387}', // ⎇
+      context: '\u{25D4}', // ◔
+      five_hour: '\u{25F7}', // ◷
+      seven_day: '\u{25A6}', // ▦
+      spend_limit: '\u{00A4}', // ¤
+      window: '\u{2756}', // ❖
+    }
+
+const iconFor = (kind: string) =>
+  kind === 'five_hour'
+    ? ICON.five_hour
+    : kind === 'seven_day'
+      ? ICON.seven_day
+      : kind === 'spend_limit'
+        ? ICON.spend_limit
+        : ICON.window
 
 // --- What the drawing reads --------------------------------------------------
 // Module-level, so a redraw costs nothing. They go back to their defaults when
@@ -188,14 +243,17 @@ export const register: Register = on => {
     ]
 
     const identity = [
-      ...cell(bg(0), bg(1), BLUE, `  ${folder}`),
+      ...cell(bg(0), bg(1), BLUE, `${ICON.folder}  ${folder}`),
       ...cell(
         bg(1),
         bg(2),
         PINK,
         (() => {
           const eff = effortBar(effort)
-          return eff ? ` ${model} ${eff.bar} (${eff.letter})` : ` ${model}`
+          const name = modelName(model)
+          return eff
+            ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter})`
+            : `${ICON.model}  ${name}`
         })(),
       ),
       ...(branch
@@ -203,7 +261,7 @@ export const register: Register = on => {
             bg(2),
             bg(3),
             isDirty ? AMBER : isAhead ? CYAN : GREEN,
-            ` ${branch} ${isDirty ? '●' : isAhead ? '⇡' : '✓'}`,
+            `${ICON.branch}  ${branch} ${isDirty ? '\u{25CF}' : isAhead ? '\u{21E1}' : '\u{2713}'}`,
           )
         : []),
     ]
@@ -213,7 +271,7 @@ export const register: Register = on => {
     const gauges = [
       ...(contextPercent === null
         ? []
-        : cell(bg(0), bg(1), FG, `◔ ${bar(contextPercent)} ${contextPercent}%`)),
+        : cell(bg(0), bg(1), FG, `${ICON.context} ${bar(contextPercent)} ${contextPercent}%`)),
       ...windows.flatMap((w, i) =>
         cell(
           bg(i + 1),
