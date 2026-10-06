@@ -202,6 +202,51 @@ async function readLine($: EngineInterface, path: string) {
   }
 }
 
+// A probe, run only by /sl-debug, for a route that would need no token at all.
+// `$.session.authorize()` hands back an opaque handle for the session's own
+// Anthropic credential -- the secret never reaches the plugin -- and
+// `$.http.fetch(url, { auth: handle })` spends it, for a first-party host only.
+// If that reaches the usage endpoint, the per-model week is available on any
+// machine with no file to install and no refresh-token risk, because the engine
+// keeps the credential fresh and this never touches it.
+async function probeAuthorize($: EngineInterface) {
+  const out: string[] = []
+  let auth
+  try {
+    auth = await $.session.authorize()
+  } catch (err) {
+    return [`authorize: threw -- ${String(err).slice(0, 90)}`]
+  }
+  if (!auth) return ['authorize: null (no first-party credential: a gateway, a 3P provider, or no login)']
+  out.push(`authorize: handle present, kind=${auth.kind}`)
+
+  try {
+    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage', {
+      auth: auth.handle,
+      headers: { 'anthropic-beta': 'oauth-2025-04-20' },
+    })
+    out.push(`  oauth/usage: HTTP ${res.status}`)
+    if (res.ok) {
+      const limits = (JSON.parse(res.text) as Record<string, any>)?.limits
+      if (Array.isArray(limits)) {
+        out.push(`  limits: ${limits.length} entry(s)`)
+        for (const l of limits) {
+          const scope = l?.scope?.model?.display_name ?? null
+          out.push(`    ${l?.kind} ${scope ? `(${scope}) ` : ''}${l?.percent}%`)
+        }
+      } else {
+        out.push('  limits: absent from the body')
+      }
+    } else {
+      out.push(`  body: ${res.text.slice(0, 120)}`)
+    }
+  } catch (err) {
+    out.push(`  oauth/usage: threw -- ${String(err).slice(0, 90)}`)
+  }
+
+  return out
+}
+
 async function refreshRemote($: EngineInterface) {
   const home = (await $.env.get('HOME')) ?? ''
   const token = await readLine($, `${home}/.ccuc/read-token`)
@@ -437,6 +482,7 @@ export const register: Register = on => {
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,
         `git: branch=${branch} dirty=${isDirty} ahead=${isAhead}`,
+        ...(await probeAuthorize($)),
         `remote: ${remote.windows.length} window(s), reported_by=${remote.reportedBy ?? '-'}`,
         `  last_ok_at=${remote.lastOkAt === null ? 'null' : new Date(remote.lastOkAt).toISOString()}`,
         `  as_of=${remote.asOf === null ? 'null' : new Date(remote.asOf).toISOString()}`,
