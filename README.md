@@ -17,7 +17,7 @@ it. The two lines move; they do not stay where `statusLine` put them.
 ## What it shows
 
 ```
-  arch     Opus 5 ▮▮▯▯▯ (M)    main ✓   ⌂ 0.1.0
+  arch     Opus 5 ▮▮▯▯▯ (M)    main ✓   ⌂ 0.1.2
  ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
 ```
 
@@ -64,9 +64,10 @@ on. The backstop and its guard are tested.
 
 ## State
 
-Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
-`/sl-effort` and `/sl-debug` work. Fourteen tests pass under `claude plugin test`,
-`tsc -p .` is clean and `claude plugin validate` passes.
+Version 0.1.2, installed from this repo's own marketplace at scope **user**, so
+it draws in every session on this box. All five commands work. Fourteen tests
+pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
+passes.
 
 Every polled figure carries a note saying why it has nothing, and `/sl-debug`
 prints it. An empty cell looks identical whether the probe answered "no branch"
@@ -170,7 +171,7 @@ is not on every machine.
 
 ### version
 
-`⌂ 0.1.0` is the **open project's** version, not the engine's, read in this
+`⌂ 0.1.2` is the **open project's** version, not the engine's, read in this
 order: `package.json`, `.claude-plugin/plugin.json`, `pyproject.toml`,
 `Cargo.toml`, then `git describe --tags`. Nothing found means no cell — `⌂ ?`
 says less than nothing does.
@@ -184,13 +185,75 @@ mark: in claude-powerline `✓` is the **git-clean** symbol, and the git cell tw
 along already draws that. (Its own version segment shows `hookData.version`,
 i.e. Claude Code's version, with no tick at all.)
 
-## Run it
+## Install
+
+This repo carries `.claude-plugin/marketplace.json`, so it **is** its own
+marketplace. Two lines on any machine, and no path anywhere:
+
+```bash
+claude plugin marketplace add ducban/sl-mod
+claude plugin install sl-mod@sl-mod
+```
+
+`"source": "."` in that manifest, because the plugin is the repo root. It lands
+at scope **user**, which is what makes it global on the box rather than tied to
+one project.
+
+An earlier attempt put a `CLAUDE_CODE_PLUGIN_DIRS` export in the shell's
+`.paths` instead. It was reverted: an absolute path in a per-machine shell file
+is three path strings across this box, the Mac and the VPS, three things to go
+stale, and the point of the mod was to stop depending on local wiring.
+
+**The repo is private.** `marketplace add` clones over HTTPS through the `gh`
+credential helper, so each machine needs its own `gh auth login` first — and the
+VPS is headless, so that is a device flow or a token there. Making the repo
+public would drop that step; it has not been decided.
+
+## Develop
+
+An installed plugin runs a **copy** Claude Code made at install time. An edit in
+this working copy reaches a session only through the full loop:
+
+```bash
+git push
+claude plugin marketplace update sl-mod
+claude plugin update sl-mod
+# then /reload-plugins, or restart
+```
+
+While actually writing code, skip all of that and load the folder directly — one
+flag on one command, nothing tracked:
 
 ```bash
 claude --plugin-dir ~/Workspace/Projects/personal_works/sl-mod
-claude plugin validate ~/Workspace/Projects/personal_works/sl-mod
-claude plugin test ~/Workspace/Projects/personal_works/sl-mod
 ```
+
+The gate before a push:
+
+```bash
+claude plugin validate .
+claude plugin test .
+tsc -p .
+```
+
+`validate` prints `gating hook without .catch: ...` for the hooks that take the
+chain. Those lines are not noise — one of them was on screen from the first
+commit while an unguarded `$.process.run` in a gating hook took three probes
+down, and it was read past every time.
+
+## Commands
+
+| | |
+|---|---|
+| `/sl` | hide or show the band |
+| `/sl-settings` | what shows, on which line, and the effort choice |
+| `/sl-help` | the legend: every item, how to read a gauge, the keys |
+| `/sl-effort <level>` | set it outright, or `off` to stop overriding |
+| `/sl-debug` | print what the engine reports, notes included |
+
+`/sl-help` and `/sl-settings` are the two tabs. `/sl-debug` prints text.
+
+## The statusLine it replaced
 
 The old `statusLine` command was removed from `~/.claude/settings.json` on
 2026-10-06 so the band is the only status line in the window. To put
