@@ -42,9 +42,7 @@ When that reading is older than fifteen minutes it isn't drawn, and the engine's
 two live windows are used instead. Two bars beat three bars holding an old
 number.
 
-## State
-
-### compaction
+## Compaction
 
 `session.measure` does **not** fire for a compaction, so the context gauge used
 to keep the figure from before it — 38% on a session that had just emptied its
