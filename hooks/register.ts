@@ -524,35 +524,62 @@ export const register: Register = on => {
     })
   })
 
-  // The controls, moved out of the band and under the prompt, into the dim
-  // hint line the engine draws there.
+  // The controls, under the prompt, on a row of their own ABOVE the engine's
+  // hint line rather than trailing off the end of it.
   //
-  // What that may cost: the types say a bare digit from an empty composer
-  // presses a BAND Button and only a band Button -- "never from the composer,
-  // save a bare digit in an empty one pressing a band Button". Nothing says a
-  // hint-line Button is reachable the same way. They stay clickable, and
-  // `/sl-effort <level>` sets it outright whatever the keys do. If 4 and 5 go
-  // dead here, the fix is to put this Box back at the end of the identity row.
+  // A tree replaces the whole line, so the engine's text has to be carried
+  // across by hand -- drop it and `esc to interrupt` goes with it. Whether the
+  // site actually gives a tree two rows is not written down anywhere in the
+  // API; the engine accepts the tree, and the terminal has the last word.
   //
-  // The engine's own line is drawn first, as text: a tree replaces the line
-  // rather than adding to it, so `hint` has to be carried across by hand.
+  // The hotkeys are set and not drawn. They do not fire from the composer --
+  // the types say a bare digit presses a BAND Button and only a band Button --
+  // so showing `4:` in front of a label would be advertising a key that does
+  // nothing. They stay registered in case the site is ever focusable.
+  //
+  // `▲▼` and not a Nerd Font pair: JetBrains Mono carries both, so they draw at
+  // the row's own size. Every glyph that needed a fallback font came out a
+  // shade small, which is the whole reason row one looks the way it does.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     if (isHidden) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    const control = (key: string, label: string, hotkey: string, onPress: () => void) =>
-      Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
+    const sep = () => Text({ color: MUTED, children: ['\u{00B7}'] })
 
     return Box({
-      flexDirection: 'row',
-      columnGap: 2,
+      flexDirection: 'column',
       children: [
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Text({ color: MUTED, children: ['effort:'] }),
+            Button({
+              key: 'effort-up',
+              label: '\u{25B2}',
+              hotkey: '5',
+              dimColor: true,
+              onPress: () => rotateEffort($, 1),
+            }),
+            Button({
+              key: 'effort-down',
+              label: '\u{25BC}',
+              hotkey: '4',
+              dimColor: true,
+              onPress: () => rotateEffort($, -1),
+            }),
+            sep(),
+            Button({
+              key: 'legend',
+              label: 'help',
+              hotkey: '0',
+              dimColor: true,
+              onPress: () =>
+                void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
+            }),
+          ],
+        }),
         ...(e.props.hint ? [Text({ color: MUTED, children: [e.props.hint] })] : []),
-        control('effort-down', 'less', '4', () => rotateEffort($, -1)),
-        control('effort-up', 'more', '5', () => rotateEffort($, 1)),
-        control('legend', 'help', '0', () =>
-          void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
-        ),
       ],
     })
   })

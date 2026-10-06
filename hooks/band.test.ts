@@ -101,9 +101,11 @@ test('the controls draw under the prompt, with the engine line kept', async ($, 
       expect(await ui.find({ key })).toBeDefined()
     }
 
-    // A tree replaces the engine's line rather than adding to it, so the line
+    // Two rows: the controls on their own, the engine's line under them. A
+    // tree replaces the line rather than adding to it, so the engine's text
     // has to be carried across by hand. Dropping it is the easy mistake and it
     // takes `esc to interrupt` with it.
+    expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /\? for shortcuts/ })).toBeDefined()
 
     await ui.unmount()

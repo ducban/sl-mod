@@ -21,7 +21,8 @@ it. The two lines move; they do not stay where `statusLine` put them.
  ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
 
  > │
-   ? for shortcuts  4: less  5: more  0: help
+   effort: [▲] [▼] · [help]
+   ⏵⏵ auto mode on · (shift+tab to cycle) · ← for agents
 ```
 
 Line one is identity, line two is budget, and the controls sit in the engine's
@@ -50,11 +51,13 @@ Both rows draw. `4` and `5` rotate effort, `0` opens the legend, and `/sl`,
 `/sl-help`, `/sl-effort` and `/sl-debug` work. Eight tests pass under
 `claude plugin test`.
 
-One thing to watch since the controls moved under the prompt: the API types say
-a bare digit from an empty composer presses a **band** Button and only a band
-Button. Nothing says a hint-line Button is reachable the same way. The buttons
-are clickable regardless, and `/sl-effort <level>` sets it outright. If `4` and
-`5` go dead, the fix is to put the Box back at the end of the identity row.
+The controls sit under the prompt, on a row of their own above the engine's
+hint line. Measured, not assumed: `4`, `5` and `0` **do not fire** there. The
+types say a bare digit from an empty composer presses a band Button and only a
+band Button, and that is what happens. The hotkeys stay registered in case the
+site is ever focusable, and they are not drawn — advertising a key that does
+nothing is worse than no key. Clicking works, and `/sl-effort <level>` sets the
+level outright.
 
 ## Run it
 
