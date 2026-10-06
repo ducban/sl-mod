@@ -2,39 +2,65 @@ import type { EngineInterface, Register } from 'claude-code'
 
 // A status line in the band above the prompt.
 //
-// Why a mod and not a `statusLine` command: the command it replaces,
-// `claude-powerline`, costs ~57 ms a render here, nearly all of it Node
-// starting up, and then it reads 127 MB of transcripts to total the tokens.
-// A mod is loaded once, so the draw is a function call.
+// Why a mod and not a `statusLine` command: the command it replaces costs ~57 ms
+// a render here, nearly all of it Node starting up, and then it reads 127 MB of
+// transcripts to total the tokens. A mod is loaded once, so the draw is a
+// function call.
 //
 // The shape that keeps it that way: nothing expensive happens while drawing.
-// `session.measure` PUSHES usage here whenever a figure moves, git is refreshed
-// on a timer, and the `ui.render` hook only reads what those left behind.
+// `session.measure` PUSHES usage here whenever a figure moves, git and the
+// project version are refreshed on a timer, and the `ui.render` hooks only read
+// what those left behind.
 
 // --- Tokyo Night Moon, the palette the old status line was already using -----
-// Read off its ANSI output rather than guessed, so the two look like one thing.
 const BLUE = '#82aaff'
 const PINK = '#fca7ea'
 const GREEN = '#c3e88d'
 const CYAN = '#86e1fc'
 const FG = '#c0caf5'
-const AMBER = '#ffc777' // not in the old output; added for the warning band
-const RED = '#ff757f' // likewise
-const MUTED = '#414868' // a background step of theirs, reused as a dim foreground
+const AMBER = '#ffc777'
+const RED = '#ff757f'
+const MUTED = '#414868'
 
 // Background steps, darkest first. Each segment takes the next one, which is
-// what gives the row its depth.
+// what gives a row its depth.
 const BG = ['#2f334d', '#1e2030', '#222436', '#414868'] as const
-// Indexing wraps, so a row of any length keeps stepping through the shades.
 const bg = (i: number) => BG[i % BG.length] as string
+
+// --- Glyphs ------------------------------------------------------------------
+// Every one written as a `\u{...}` escape. Written as characters they were lost
+// in a file write once already, and the symptom was quiet: every icon became an
+// empty string, and the powerline separator drew nothing at all for four
+// commits.
+//
+// Measured with `fc-list :charset=<cp>`, because a glyph JetBrains Mono does not
+// carry is drawn by whichever fallback font fontconfig reaches, at that font's
+// metrics -- which is why some of these sit a shade smaller than the row.
+//
+//   in JetBrains Mono    E0B0 2302 2713 25CF 21E1 25B2 25BC 00B7 25A0 25A1 2588 2591 2593
+//   from a fallback      F07B F1B2 E725 (Nerd Font) and 25B0 25B1 25AE 25AF
+const ICON = {
+  folder: '\u{F07B}', // nf-fa-folder
+  model: '\u{F1B2}', // nf-fa-cube
+  branch: '\u{E725}', // nf-dev-git_branch
+  version: '\u{2302}', // house
+  dirty: '\u{25CF}', // uncommitted changes
+  ahead: '\u{21E1}', // ahead of upstream
+  clean: '\u{2713}', // nothing to commit
+  sep: '\u{E0B0}', // the powerline separator between two cells
+  dot: '\u{00B7}',
+  up: '\u{25B2}',
+  down: '\u{25BC}',
+}
 
 // --- Gauges ------------------------------------------------------------------
 // Five segments of 20%, rounded UP: 19% has to show one segment, not none. A
 // quota must never read lower than it is. Only a true zero is empty.
-const FILLED = '▰'
-const EMPTY = '▱'
+const FILLED = '\u{25B0}'
+const EMPTY = '\u{25B1}'
 const bar = (percent: number) => {
   const on = percent <= 0 ? 0 : Math.min(5, Math.ceil(percent / 20))
+
   return FILLED.repeat(on) + EMPTY.repeat(5 - on)
 }
 
@@ -43,23 +69,33 @@ const bar = (percent: number) => {
 const barColor = (percent: number) => (percent >= 85 ? RED : percent >= 60 ? AMBER : GREEN)
 
 // Effort uses a different glyph family from the quota bars on purpose. One is
-// the level you chose, the other is how much you have spent, and they should
-// not read as the same kind of thing.
-const EFFORT_FILLED = '▮'
-const EFFORT_EMPTY = '▯'
+// the level you chose, the other is how much you have spent.
+const EFFORT_FILLED = '\u{25AE}'
+const EFFORT_EMPTY = '\u{25AF}'
 const EFFORT_STEPS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 const EFFORT_LETTER: Record<string, string> = {
   low: 'L',
   medium: 'M',
   high: 'H',
   xhigh: 'X',
-  max: '✦',
+  max: '\u{2726}',
 }
-// `$.session.model()` answers the id, `claude-opus-5`. The display name lives
-// in the status line payload, which a mod never sees, so the names are here.
-// Anything unmapped is derived rather than printed raw: drop `claude-`, drop a
-// trailing date, title-case the family and join the version with a dot, so a
-// model added after this was written still reads as a name.
+
+const effortBar = (level: string | undefined) => {
+  if (!level) return null
+  const step = EFFORT_STEPS.indexOf(level as (typeof EFFORT_STEPS)[number]) + 1
+  if (step === 0) return { bar: EFFORT_EMPTY.repeat(5), letter: '?' }
+
+  return {
+    bar: EFFORT_FILLED.repeat(step) + EFFORT_EMPTY.repeat(5 - step),
+    letter: EFFORT_LETTER[level] ?? '?',
+  }
+}
+
+// `$.session.model()` answers the id, `claude-opus-5`. The display name lives in
+// the status line payload, which a mod never sees, so the names are here.
+// Anything unmapped is derived rather than printed raw, so a model added after
+// this was written still reads as a name.
 const MODEL_NAME: Record<string, string> = {
   'claude-opus-5': 'Opus 5',
   'claude-opus-5-5': 'Opus 5.5',
@@ -73,65 +109,94 @@ const modelName = (id: string) => {
   const parts = id.replace(/^claude-/, '').replace(/-\d{8}$/, '').split('-')
   const family = parts.shift() ?? id
   const version = parts.join('.')
-  const titled = family.charAt(0).toUpperCase() + family.slice(1)
-  return version ? `${titled} ${version}` : titled
+
+  return version ? `${family.charAt(0).toUpperCase() + family.slice(1)} ${version}` : family
 }
 
-const effortBar = (level: string | undefined) => {
-  if (!level) return null
-  const step = EFFORT_STEPS.indexOf(level as (typeof EFFORT_STEPS)[number]) + 1
-  if (step === 0) return { bar: EFFORT_EMPTY.repeat(5), letter: '?' }
-  return {
-    bar: EFFORT_FILLED.repeat(step) + EFFORT_EMPTY.repeat(5 - step),
-    letter: EFFORT_LETTER[level] ?? '?',
-  }
+// --- What can be on the band, and where -------------------------------------
+// One entry per item, in the order they are drawn within a line. The hotkey is
+// what presses that item's row in the settings pane: one digit or one lowercase
+// letter, which is all a Button takes -- `$` was refused.
+type ItemKey =
+  | 'dir'
+  | 'model'
+  | 'git'
+  | 'version'
+  | 'context'
+  | 'five_hour'
+  | 'seven_day'
+  | 'scoped'
+  | 'spend'
+  | 'other'
+  | 'input'
+  | 'output'
+  | 'cache'
+  | 'cost'
+
+const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
+  { key: 'dir', hotkey: 'd', name: 'dir', about: 'the working directory, last segment only' },
+  { key: 'model', hotkey: 'm', name: 'model', about: 'the model, with the effort it is sending' },
+  { key: 'git', hotkey: 'g', name: 'git', about: 'branch, and whether it is clean' },
+  { key: 'version', hotkey: 'v', name: 'version', about: "the open project's own version" },
+  { key: 'context', hotkey: 'c', name: 'context', about: 'how full the context window is' },
+  { key: 'five_hour', hotkey: '5', name: '5h', about: 'the five-hour window' },
+  { key: 'seven_day', hotkey: '7', name: '7d', about: 'the seven-day window' },
+  { key: 'scoped', hotkey: 'f', name: 'scoped', about: 'a window scoped to one model' },
+  { key: 'spend', hotkey: 'p', name: 'spend', about: "a gateway's spend limit" },
+  { key: 'other', hotkey: 'x', name: 'other', about: 'any other window, under its own name' },
+  { key: 'input', hotkey: 'i', name: 'input', about: 'uncached input tokens this session' },
+  { key: 'output', hotkey: 'o', name: 'output', about: 'output tokens this session' },
+  { key: 'cache', hotkey: 'h', name: 'cache', about: 'cache hit rate -- drawn only under 70%' },
+  { key: 'cost', hotkey: 'u', name: 'cost', about: 'what this session has cost, in USD' },
+]
+
+// 0 is off; 1 to 4 is which line it sits on. Four lines is the cap.
+const MAX_LINES = 4
+type Layout = Record<ItemKey, number>
+const DEFAULT_LAYOUT: Layout = {
+  dir: 1,
+  model: 1,
+  git: 1,
+  version: 1,
+  context: 2,
+  five_hour: 2,
+  seven_day: 2,
+  scoped: 2,
+  spend: 2,
+  other: 2,
+  input: 0,
+  output: 0,
+  cache: 2,
+  cost: 0,
 }
+let layout: Layout = { ...DEFAULT_LAYOUT }
 
-// The three identity cells take icons again. Written as escapes, not as the
-// characters themselves: the glyphs were lost in transit the first time and
-// every icon came out an empty string -- the same accident that left the
-// powerline separator below drawing nothing at all.
-//
-// They sit a shade smaller than the text beside them and that cannot be fixed
-// from here: JetBrains Mono carries none of these, so fontconfig draws each
-// from whichever fallback font has it, at that font's metrics. A mod does not
-// choose the font.
-const ICON = {
-  folder: '\u{F07B}', //  nf-fa-folder
-  model: '\u{F1B2}', //  nf-fa-cube
-  branch: '\u{E725}', //  nf-dev-git_branch
-  dirty: '\u{25CF}', // ● uncommitted changes
-  ahead: '\u{21E1}', // ⇡ ahead of upstream
-  clean: '\u{2713}', // ✓ nothing to commit
-  sep: '\u{E0B0}', //  the powerline separator between two cells
+// Which item a rate-limit window belongs to, so one toggle covers every window
+// of that sort. The engine says `five_hour` and `seven_day`; the usage endpoint
+// says `session`, `weekly_all` and `weekly_scoped`. A window carrying a scope is
+// labelled with the model it is scoped to.
+type Window = { kind: string; percentUsed: number; scope?: string | null }
+const itemForWindow = (w: Window): ItemKey => {
+  if (w.scope) return 'scoped'
+  if (w.kind === 'five_hour' || w.kind === 'session') return 'five_hour'
+  if (w.kind === 'seven_day' || w.kind === 'weekly_all') return 'seven_day'
+  if (w.kind === 'spend_limit') return 'spend'
+
+  return 'other'
 }
+const labelForWindow = (w: Window) => {
+  if (w.scope) return w.scope.toLowerCase()
+  const item = itemForWindow(w)
+  if (item === 'five_hour') return '5h'
+  if (item === 'seven_day') return '7d'
+  if (item === 'spend') return 'spend'
 
-// The gauges stay worded. A word is read at the size of the row and says more
-// than a glyph; the windows are the half of the band that has to be read fast.
-const LABEL = {
-  context: 'ct',
-  five_hour: '5h',
-  seven_day: '7d',
-  spend_limit: 'spend',
-}
-
-// Two vocabularies for the same thing. The engine says `five_hour` and
-// `seven_day`; the usage endpoint says `session`, `weekly_all` and
-// `weekly_scoped`. A window carrying a scope is labelled with the model it is
-// scoped to, so a per-model week reads as `fable` whatever its kind is called.
-const labelFor = (kind: string, scope?: string | null) => {
-  if (scope) return scope.toLowerCase()
-  if (kind === 'five_hour' || kind === 'session') return LABEL.five_hour
-  if (kind === 'seven_day' || kind === 'weekly_all') return LABEL.seven_day
-  if (kind === 'spend_limit') return LABEL.spend_limit
-
-  return kind
+  return w.kind
 }
 
 // --- What the drawing reads --------------------------------------------------
 // Module-level, so a redraw costs nothing. They go back to their defaults when
 // the module reloads, and each is filled again by the hook that owns it.
-type Window = { kind: string; percentUsed: number; scope?: string | null }
 type Effort = (typeof EFFORT_STEPS)[number]
 let contextPercent: number | null = null
 let windows: Window[] = []
@@ -140,16 +205,42 @@ let branch: string | null = null
 let isDirty = false
 let isAhead = false
 let isHidden = false
+let projectVersion: string | null = null
 
-// The rotate keys set this, and nothing else does. While it is null the
-// `turn.step` hook passes every request through untouched, so the band starts
-// out reporting the session's own effort rather than quietly steering it. Only
-// once the user has pressed a key does this mod have an opinion -- which also
-// means it cannot fight a change made through `/model` or the thinking toggle
-// until asked to.
+// The rotate keys and `/sl-effort` set this, and nothing else does. While it is
+// null the `turn.step` hook passes every request through untouched, so the band
+// reports the session's own effort rather than quietly steering it.
 let effortOverride: Effort | null = null
 
-const PANE = 'sl-legend'
+// Token counts, summed over the session's priced responses. The engine hands a
+// mod one money figure -- the session total -- and no split, so `input` and
+// `output` here are token counts and not dollars. Turning them into dollars
+// would mean a price table in this file, and a price table in a file is a number
+// that goes wrong silently the day the prices change.
+let tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+let costUsd: number | null = null
+
+// Cache hit is a number that reads 98-100% nearly always, and when it drops the
+// money is already spent. So it is not drawn until it is worth acting on.
+const CACHE_ALERT_BELOW = 70
+const cacheHit = () => {
+  const prompt = tokens.input + tokens.cacheRead + tokens.cacheWrite
+  if (prompt === 0) return null
+
+  return Math.round((tokens.cacheRead / prompt) * 100)
+}
+
+const tk = (n: number) =>
+  n >= 1e9
+    ? `${(n / 1e9).toFixed(1)}B`
+    : n >= 1e6
+      ? `${(n / 1e6).toFixed(1)}M`
+      : n >= 1e3
+        ? `${(n / 1e3).toFixed(1)}k`
+        : String(n)
+
+const LEGEND = 'sl-legend'
+const SETTINGS = 'sl-settings'
 
 // --- Where the windows come from --------------------------------------------
 // The engine hands a mod two windows, `five_hour` and `seven_day`. The per-model
@@ -160,11 +251,7 @@ const PANE = 'sl-legend'
 // here. It answers an opaque handle for the session's own Anthropic token, and
 // `$.http.fetch(url, { auth: handle })` spends it against a first-party host.
 // The mod never reads .credentials.json and never refreshes anything, so the
-// token rotation that can kill a Claude Code session is not in play: the engine
-// owns the credential and keeps it fresh.
-//
-// Measured on this box: handle present, kind=bearer, HTTP 200, three windows
-// including `weekly_scoped (Fable) 26%`.
+// token rotation that can kill a Claude Code session is not in play.
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const USAGE_BETA = 'oauth-2025-04-20'
 const POLL_MS = 180_000
@@ -181,10 +268,9 @@ let reading: Reading = { windows: [], at: null, note: 'not fetched yet' }
 
 // Anthropic rate-limits this endpoint, and this mod is not the only caller: ccuc
 // polls the same account from three machines every five minutes, and a mod runs
-// on each machine with Claude Code open. So a 429 has to mean stop, not try again
-// in three minutes. Nothing is attempted before this time.
+// on each machine with Claude Code open. So a 429 has to mean stop, not try
+// again in three minutes.
 let nextAllowedAt = 0
-// A 429 with no Retry-After, or one asking for something unreasonable.
 const DEFAULT_BACKOFF_MS = 10 * 60_000
 const MAX_BACKOFF_MS = 60 * 60_000
 
@@ -227,12 +313,12 @@ async function refreshUsage($: EngineInterface) {
   }
   if (!res.ok) {
     if (res.status === 429) {
-      // Retry-After is seconds or an HTTP date; take seconds and sanity-bound it,
-      // since a header asking for a week would silence the row until a restart.
+      // Retry-After is seconds or an HTTP date; take seconds and sanity-bound
+      // it, since a header asking for a week would silence the row until a
+      // restart.
       const asked = Number(res.headers['retry-after'] ?? res.headers['Retry-After'])
-      const wait = Number.isFinite(asked) && asked > 0
-        ? Math.min(asked * 1000, MAX_BACKOFF_MS)
-        : DEFAULT_BACKOFF_MS
+      const wait =
+        Number.isFinite(asked) && asked > 0 ? Math.min(asked * 1000, MAX_BACKOFF_MS) : DEFAULT_BACKOFF_MS
       nextAllowedAt = now + wait
       reading = { ...reading, note: `rate limited, waiting ${Math.round(wait / 1000)}s` }
 
@@ -257,7 +343,7 @@ async function refreshUsage($: EngineInterface) {
     return
   }
 
-  const windows = limits.flatMap(entry => {
+  const fetched = limits.flatMap(entry => {
     const one = entry as Record<string, any>
     const kind = typeof one.kind === 'string' ? one.kind : null
     const percent = typeof one.percent === 'number' ? one.percent : null
@@ -270,36 +356,70 @@ async function refreshUsage($: EngineInterface) {
   // would be inventing them, so nothing is drawn.
   nextAllowedAt = 0
   reading = {
-    windows,
-    at: windows.length > 0 ? now : null,
-    note: windows.length > 0 ? '' : 'the body carried no windows',
+    windows: fetched,
+    at: fetched.length > 0 ? now : null,
+    note: fetched.length > 0 ? '' : 'the body carried no windows',
   }
 }
 
-// A digit is the only key that reaches a band Button while the band has no
-// keyboard focus, and then only from an empty prompt -- every letter goes to the
-// composer. So the rotate keys are digits, and 1-3 stay free for tabs.
+// --- The open project's version ---------------------------------------------
+// Whatever the repo in the cwd declares, in the order a repo is most likely to
+// declare it. Nothing found means the cell is not drawn: `⌂ ?` says less than
+// no cell at all.
 //
-// Declared up here, not inside `register`: `claude plugin validate` follows `$`
-// only into a function declared at the top of the file, and refuses a closure it
-// cannot trace. tsc was happy with it either way.
-function rotateEffort($: EngineInterface, by: number) {
-  const from = effortOverride ?? (effort as Effort | undefined) ?? 'medium'
-  const at = EFFORT_STEPS.indexOf(from)
-  const to = EFFORT_STEPS[Math.min(EFFORT_STEPS.length - 1, Math.max(0, at + by))]
-  if (to) effortOverride = to
-  $.ui.invalidate('ui.render')
+// A version read from a git tag gets `+N` when HEAD has moved past it, because
+// then the thing running is not the thing the tag names. A version read from a
+// file gets no mark: claude-powerline's `✓` is its GIT-CLEAN symbol, not a
+// version one, and the git cell two along already draws that.
+const VERSION_FILES: { path: string; read: (text: string) => string | null }[] = [
+  { path: 'package.json', read: t => (JSON.parse(t) as { version?: string }).version ?? null },
+  {
+    path: '.claude-plugin/plugin.json',
+    read: t => (JSON.parse(t) as { version?: string }).version ?? null,
+  },
+  { path: 'pyproject.toml', read: t => t.match(/^\s*version\s*=\s*["']([^"']+)["']/m)?.[1] ?? null },
+  { path: 'Cargo.toml', read: t => t.match(/^\s*version\s*=\s*["']([^"']+)["']/m)?.[1] ?? null },
+]
+
+async function refreshVersion($: EngineInterface) {
+  for (const source of VERSION_FILES) {
+    try {
+      if (!(await $.fs.exists(source.path))) continue
+      const found = source.read(await $.fs.read(source.path))
+      if (found) {
+        projectVersion = found
+
+        return
+      }
+    } catch {
+      // A malformed or unreadable file is not an error worth a cell; try the
+      // next source.
+    }
+  }
+
+  const tag = await $.process.run(['git', 'describe', '--tags', '--abbrev=0'], { timeoutMs: 3000 })
+  if (tag.exitCode !== 0) {
+    projectVersion = null
+
+    return
+  }
+  const name = tag.stdout.trim()
+  const since = await $.process.run(['git', 'rev-list', '--count', `${name}..HEAD`], {
+    timeoutMs: 3000,
+  })
+  const ahead = since.exitCode === 0 ? Number(since.stdout.trim()) : 0
+  projectVersion = ahead > 0 ? `${name}+${ahead}` : name
 }
 
 async function refreshGit($: EngineInterface) {
   // `--porcelain=v2 --branch` answers all three questions in one call: the
   // branch name, whether anything is modified, and how far ahead of upstream.
-  const { exitCode, stdout } = await $.process.run(
-    ['git', 'status', '--porcelain=v2', '--branch'],
-    { timeoutMs: 3000 },
-  )
+  const { exitCode, stdout } = await $.process.run(['git', 'status', '--porcelain=v2', '--branch'], {
+    timeoutMs: 3000,
+  })
   if (exitCode !== 0) {
     branch = null
+
     return
   }
   const lines = stdout.split('\n')
@@ -311,31 +431,220 @@ async function refreshGit($: EngineInterface) {
   isAhead = ab ? Number(ab.split(' ')[2] ?? '+0') > 0 : false
 }
 
+// The four token counts of the last response, which is the only place a mod can
+// read them: `context.breakdown.apiUsage`, and the breakdown is computed only
+// when asked for. `summary` estimates locally and sends no request.
+//
+// Called from `session.measure` and only when `cost` moved, which is the
+// engine's own word for "a priced response landed". Sampling on a timer instead
+// would miss responses and undercount; sampling on every measurement would
+// double-count the same response.
+const wantsTokens = () =>
+  layout.input > 0 || layout.output > 0 || layout.cache > 0
+
+async function sampleTokens($: EngineInterface) {
+  if (!wantsTokens()) return
+  try {
+    const usage = await $.session.usage({ breakdown: 'summary' })
+    const api = usage.context.breakdown?.apiUsage
+    if (!api) return
+    tokens = {
+      input: tokens.input + api.input_tokens,
+      output: tokens.output + api.output_tokens,
+      cacheRead: tokens.cacheRead + api.cache_read_input_tokens,
+      cacheWrite: tokens.cacheWrite + api.cache_creation_input_tokens,
+    }
+  } catch {
+    // A breakdown the engine declines to compute is not worth failing a hook
+    // the whole band draws from.
+  }
+}
+
+// Declared up here, not inside `register`: `claude plugin validate` follows `$`
+// only into a function declared at the top of the file, and refuses a closure it
+// cannot trace. tsc was happy with it either way.
+function rotateEffort($: EngineInterface, by: number) {
+  const from = effortOverride ?? (effort as Effort | undefined) ?? 'medium'
+  const at = EFFORT_STEPS.indexOf(from)
+  const to = EFFORT_STEPS[Math.min(EFFORT_STEPS.length - 1, Math.max(0, at + by))]
+  if (to) effortOverride = to
+  $.ui.invalidate('ui.render')
+}
+
+// One press moves an item on: 1, 2, 3, 4, off, 1. One key per item and no
+// cursor to keep track of, which is the whole reason the pane is shaped this
+// way.
+async function cycleItem($: EngineInterface, key: ItemKey) {
+  layout = { ...layout, [key]: (layout[key] + 1) % (MAX_LINES + 1) }
+  await $.store.set('layout', layout)
+  $.ui.invalidate('ui.render')
+}
+
+async function resetLayout($: EngineInterface) {
+  layout = { ...DEFAULT_LAYOUT }
+  await $.store.set('layout', layout)
+  $.ui.invalidate('ui.render')
+}
+
+// --- Turning state into cells ------------------------------------------------
+// Pure data: a colour and a string, no elements. Both the band and the settings
+// pane's preview build from this, so the preview cannot describe a row the band
+// is not drawing.
+type Part = { fg: string; text: string }
+type Ctx = { folder: string; model: string; windows: Window[] }
+
+function partsFor(key: ItemKey, ctx: Ctx): Part[] {
+  if (key === 'dir') return [{ fg: BLUE, text: `${ICON.folder}  ${ctx.folder}` }]
+
+  if (key === 'model') {
+    // Draw the override when there is one, so the row shows what will be sent
+    // rather than what was last seen.
+    const eff = effortBar(effortOverride ?? effort)
+    const name = modelName(ctx.model)
+
+    return [
+      {
+        fg: PINK,
+        text: eff ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter})` : `${ICON.model}  ${name}`,
+      },
+    ]
+  }
+
+  if (key === 'git') {
+    if (branch === null) return []
+
+    return [
+      {
+        fg: isDirty ? AMBER : isAhead ? CYAN : GREEN,
+        text: `${ICON.branch}  ${branch} ${isDirty ? ICON.dirty : isAhead ? ICON.ahead : ICON.clean}`,
+      },
+    ]
+  }
+
+  if (key === 'version') {
+    if (projectVersion === null) return []
+
+    return [{ fg: FG, text: `${ICON.version} ${projectVersion}` }]
+  }
+
+  if (key === 'context') {
+    if (contextPercent === null) return []
+
+    return [
+      {
+        fg: barColor(contextPercent),
+        text: `ct ${bar(contextPercent)} ${contextPercent}%`,
+      },
+    ]
+  }
+
+  if (key === 'input') {
+    if (tokens.input === 0) return []
+
+    return [{ fg: FG, text: `i ${tk(tokens.input)}` }]
+  }
+
+  if (key === 'output') {
+    if (tokens.output === 0) return []
+
+    return [{ fg: FG, text: `o ${tk(tokens.output)}` }]
+  }
+
+  if (key === 'cache') {
+    const hit = cacheHit()
+    // Silent while it is healthy. A permanent cell for a number that reads 99%
+    // is spent width, and the drop is the only moment it says anything.
+    if (hit === null || hit >= CACHE_ALERT_BELOW) return []
+
+    return [{ fg: RED, text: `ch ${hit}%` }]
+  }
+
+  if (key === 'cost') {
+    if (costUsd === null) return []
+
+    return [{ fg: FG, text: `$ ${costUsd.toFixed(2)}` }]
+  }
+
+  // Everything left is a rate-limit window, and there may be several of a kind.
+  return ctx.windows
+    .filter(w => itemForWindow(w) === key)
+    .map(w => ({
+      fg: barColor(w.percentUsed),
+      text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+    }))
+}
+
+// The band, line by line. An item whose data is missing draws nothing even when
+// it is switched on -- an empty bar reads as "nothing spent yet", which is the
+// kind of green-because-it-was-attempted reading this repo keeps finding. A line
+// with nothing on it is dropped rather than left as a gap.
+function buildLines(ctx: Ctx): Part[][] {
+  const lines: Part[][] = Array.from({ length: MAX_LINES }, () => [])
+  for (const item of ITEMS) {
+    const n = layout[item.key]
+    if (n < 1 || n > MAX_LINES) continue
+    lines[n - 1]?.push(...partsFor(item.key, ctx))
+  }
+
+  return lines.filter(line => line.length > 0)
+}
+
+// Which reading to draw. The remote one is preferred because it is the only one
+// carrying the per-model week, but only while it is fresh: past the staleness
+// bound the engine's two live windows are used instead.
+function shownWindows(now: number): Window[] {
+  const age = reading.at === null ? null : now - reading.at
+  const fresh = reading.windows.length > 0 && age !== null && age < STALE_MS
+
+  return fresh ? reading.windows : windows
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     for (const [name, description] of [
       ['sl', 'Show or hide the status line band'],
       ['sl-help', 'Open the status line legend'],
+      ['sl-settings', 'Choose what the status line shows, and on which line'],
       ['sl-effort', 'Set reasoning effort: low, medium, high, xhigh, max, or off'],
       ['sl-debug', 'Print the raw session usage the status line reads'],
     ] as const) {
       await $.command.register({ name, description })
     }
 
-    // Hiding the band is a preference, so it outlives the session. `$.store` is
-    // shared by every session on the machine, which is what is wanted here: the
-    // band is either something you want above your prompt or it is not.
+    // Hiding the band and the layout are both preferences, so they outlive the
+    // session. `$.store` is shared by every session on the machine, which is
+    // what is wanted: the band is either the shape you want above your prompt
+    // or it is not.
     isHidden = (await $.store.get('isHidden')) === true
+    const saved = await $.store.get('layout')
+    if (saved && typeof saved === 'object') {
+      // Merged over the defaults, never used as-is: a layout stored before an
+      // item existed would leave that item undefined, and `undefined < 1` is
+      // false, so it would draw on line NaN.
+      const asRecord = saved as Record<string, unknown>
+      const merged = { ...DEFAULT_LAYOUT }
+      for (const item of ITEMS) {
+        const n = asRecord[item.key]
+        if (typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= MAX_LINES) {
+          merged[item.key] = n
+        }
+      }
+      layout = merged
+    }
 
-    // The first reading, before any measurement has been pushed.
+    // The first readings, before any measurement has been pushed.
     const usage = await $.session.usage()
     contextPercent = usage.context.percent ?? null
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    costUsd = usage.cost?.usd ?? null
 
     await refreshGit($)
-    // Git is the one figure nothing pushes, so it is the one thing polled --
-    // off the draw path, where its cost does not show.
+    await refreshVersion($)
+    // Git is the one figure nothing pushes, so it is what gets polled -- off the
+    // draw path, where its cost does not show. The version rides the same timer
+    // but far more slowly: it changes when someone edits package.json.
     $.clock.every(5000, () => void refreshGit($))
+    $.clock.every(60_000, () => void refreshVersion($))
 
     // Off the draw path, always: a network call must never sit between a
     // keystroke and a frame.
@@ -353,7 +662,9 @@ export const register: Register = on => {
     const usage = await $.session.usage()
     contextPercent = usage.context.percent ?? null
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    costUsd = usage.cost?.usd ?? null
     await refreshGit($)
+    await refreshVersion($)
     await refreshUsage($)
 
     return next(e)
@@ -363,15 +674,19 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     contextPercent = e.context.percent ?? contextPercent
     windows = e.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    costUsd = e.cost?.usd ?? costUsd
+    // `cost` in `changed` is the engine saying a priced response landed, which
+    // is exactly once per response: the dedup signal the token counts need.
+    if (e.changed.includes('cost')) await sampleTokens($)
 
     return next(e)
   })
 
   // The only place effort can be read. `$.env.get('CLAUDE_EFFORT')` is
-  // `undefined` in here -- the engine exports that variable to hook commands
-  // and to Bash, not to a hooks module, which cost an afternoon to find out.
-  // So it is unknown until the first model request of the session, and what
-  // shows afterwards is the effort actually sent, after any silent downgrade.
+  // `undefined` in here -- the engine exports that variable to hook commands and
+  // to Bash, not to a hooks module, which cost an afternoon to find out. So it
+  // is unknown until the first model request of the session, and what shows
+  // afterwards is the effort actually sent, after any silent downgrade.
   on('turn.step', async function* ($, e, next) {
     if (typeof e.effort === 'string') effort = e.effort
     if (effortOverride !== null && effortOverride !== e.effort) {
@@ -391,7 +706,13 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'sl-help' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true })
+    await $.ui.open({ id: LEGEND, title: 'sl help', focus: true, closeOnEscape: true })
+
+    return {}
+  })
+
+  on('command.run', { command: 'sl-settings' }, async $ => {
+    await $.ui.open({ id: SETTINGS, title: 'sl settings', focus: true, closeOnEscape: true })
 
     return {}
   })
@@ -424,7 +745,11 @@ export const register: Register = on => {
         `cost: ${JSON.stringify(usage.cost)}`,
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,
+        `effort override: ${effortOverride ?? 'none'}`,
         `git: branch=${branch} dirty=${isDirty} ahead=${isAhead}`,
+        `project version: ${projectVersion ?? 'none found'}`,
+        `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
+        `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `usage endpoint: ${reading.windows.length} window(s)`,
         ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
         `  note=${reading.note || 'ok'}`,
@@ -438,11 +763,18 @@ export const register: Register = on => {
 
     const { Box, Text } = $.ui.resolve(e)
     const cwd = await $.session.cwd()
-    const folder = cwd.replace(/\/+$/, '').split('/').pop() || '/'
     const model = await $.session.model()
+    const now = await $.clock.now()
 
     // While Claude works the spinner is what matters, so the row steps back.
     const dim = e.props.isWorking
+
+    const lines = buildLines({
+      folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
+      model,
+      windows: shownWindows(now),
+    })
+    if (lines.length === 0) return next(e)
 
     // One powerline row. Each cell takes the next cell's background as its
     // separator's foreground, so the two melt into one another; the last
@@ -450,10 +782,10 @@ export const register: Register = on => {
     // colour hanging off the end of the row.
     //
     // No `key` on these. `Text` does not take one, and a prop an element does
-    // not take makes the engine throw the whole tree away and draw its own
-    // band instead -- silently, apart from one dim line in the transcript. tsc
-    // caught it; the running session would not have.
-    const row = (parts: { fg: string; text: string }[]) =>
+    // not take makes the engine throw the whole tree away and draw its own band
+    // instead -- silently, apart from one dim line in the transcript. tsc caught
+    // it; the running session would not have.
+    const row = (parts: Part[]) =>
       parts.flatMap((part, i) => {
         const here = bg(i)
         const after = i === parts.length - 1 ? undefined : bg(i + 1)
@@ -464,132 +796,132 @@ export const register: Register = on => {
         ]
       })
 
-    const identity = [
-      { fg: BLUE, text: `${ICON.folder}  ${folder}` },
-      {
-        fg: PINK,
-        text: (() => {
-          // Draw the override when there is one, so the row shows what will be
-          // sent rather than what was last seen.
-          const eff = effortBar(effortOverride ?? effort)
-          const name = modelName(model)
-
-          return eff ? `${ICON.model}  ${name} ${eff.bar} (${eff.letter})` : `${ICON.model}  ${name}`
-        })(),
-      },
-      ...(branch
-        ? [
-            {
-              fg: isDirty ? AMBER : isAhead ? CYAN : GREEN,
-              text: `${ICON.branch}  ${branch} ${isDirty ? ICON.dirty : isAhead ? ICON.ahead : ICON.clean}`,
-            },
-          ]
-        : []),
-    ]
-
-    // Which reading to draw. The remote one is preferred because it is the only
-    // one carrying the per-model week, but only while it is fresh: past the
-    // staleness bound the engine's two live windows are used instead. Fewer bars
-    // is honest, a bar holding a number from an hour ago is not.
-    const now = await $.clock.now()
-    const age = reading.at === null ? null : now - reading.at
-    const fresh = reading.windows.length > 0 && age !== null && age < STALE_MS
-    const shown = fresh ? reading.windows : windows
-
-    // Every gauge means the same thing -- how much of an allowance is gone --
-    // so they can sit in one row and be read at a glance.
-    const gauges = [
-      ...(contextPercent === null
-        ? []
-        : [
-            {
-              fg: barColor(contextPercent),
-              text: `${LABEL.context} ${bar(contextPercent)} ${contextPercent}%`,
-            },
-          ]),
-      ...shown.map(w => ({
-        fg: barColor(w.percentUsed),
-        text: `${labelFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
-      })),
-    ]
-
-    if (identity.length === 0 && gauges.length === 0) return next(e)
-
     return Box({
       flexDirection: 'column',
+      children: lines.map(line => Box({ flexDirection: 'row', children: row(line) })),
+    })
+  })
+
+  // The controls, under the prompt.
+  //
+  // What was tried and did not work: a column tree here does not give two rows.
+  // The site is one row, and a tree carrying both the controls and the engine's
+  // `hint` string came out as one wrapped line with the engine's own text broken
+  // across it. So this draws the controls alone, and only while the session is
+  // idle -- while a turn runs, the hook passes and the engine keeps its line,
+  // because `esc to interrupt` is worth more than two buttons.
+  //
+  // The hotkeys are registered and not drawn. They do not fire from the composer
+  // -- the types say a bare digit presses a BAND Button and only a band Button,
+  // and that is what happens -- so printing `4:` in front of a label would be
+  // advertising a key that does nothing. `/sl-help` and `/sl-settings` are the
+  // keyboard route, and they open as two tabs of one pane.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if (isHidden || e.props.isWorking) return next(e)
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+
+    return Box({
+      flexDirection: 'row',
+      columnGap: 1,
       children: [
-        Box({ flexDirection: 'row', children: row(identity) }),
-        Box({ flexDirection: 'row', children: row(gauges) }),
+        Text({ color: MUTED, children: ['effort:'] }),
+        Button({
+          key: 'effort-up',
+          label: ICON.up,
+          hotkey: '5',
+          dimColor: true,
+          onPress: () => rotateEffort($, 1),
+        }),
+        Button({
+          key: 'effort-down',
+          label: ICON.down,
+          hotkey: '4',
+          dimColor: true,
+          onPress: () => rotateEffort($, -1),
+        }),
       ],
     })
   })
 
-  // The controls, under the prompt, on a row of their own ABOVE the engine's
-  // hint line rather than trailing off the end of it.
-  //
-  // A tree replaces the whole line, so the engine's text has to be carried
-  // across by hand -- drop it and `esc to interrupt` goes with it. Whether the
-  // site actually gives a tree two rows is not written down anywhere in the
-  // API; the engine accepts the tree, and the terminal has the last word.
-  //
-  // The hotkeys are set and not drawn. They do not fire from the composer --
-  // the types say a bare digit presses a BAND Button and only a band Button --
-  // so showing `4:` in front of a label would be advertising a key that does
-  // nothing. They stay registered in case the site is ever focusable.
-  //
-  // `▲▼` and not a Nerd Font pair: JetBrains Mono carries both, so they draw at
-  // the row's own size. Every glyph that needed a fallback font came out a
-  // shade small, which is the whole reason row one looks the way it does.
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    if (isHidden) return next(e)
-
+  // The settings pane. One key per item, and a press moves that item on:
+  // 1, 2, 3, 4, off, 1. No cursor to keep track of.
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const sep = () => Text({ color: MUTED, children: ['\u{00B7}'] })
+    const cwd = await $.session.cwd()
+    const model = await $.session.model()
+    const now = await $.clock.now()
+    const ctx: Ctx = {
+      folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
+      model,
+      windows: shownWindows(now),
+    }
+
+    const itemRow = (item: (typeof ITEMS)[number]) => {
+      const n = layout[item.key]
+      const parts = partsFor(item.key, ctx)
+      const preview = parts.length > 0 ? parts.map(p => p.text).join('  ') : '(nothing to show yet)'
+
+      return Box({
+        flexDirection: 'row',
+        columnGap: 1,
+        children: [
+          Button({
+            key: `item-${item.key}`,
+            label: item.name.padEnd(9),
+            hotkey: item.hotkey,
+            plain: true,
+            onPress: () => void cycleItem($, item.key),
+          }),
+          Text({
+            color: n > 0 ? BLUE : MUTED,
+            children: [n > 0 ? `line ${n}` : 'off   '],
+          }),
+          Text({ color: parts.length > 0 ? FG : MUTED, wrap: 'truncate-end', children: [preview] }),
+        ],
+      })
+    }
+
+    const lines = buildLines(ctx)
 
     return Box({
       flexDirection: 'column',
       children: [
+        Text({ color: MUTED, wrap: 'wrap', children: ['A key moves its item on: 1, 2, 3, 4, off.'] }),
+        Text({ children: [' '] }),
+        ...ITEMS.map(itemRow),
+        Text({ children: [' '] }),
+        Text({ color: BLUE, bold: true, children: ['As the band will draw it'] }),
+        ...(lines.length === 0
+          ? [Text({ color: MUTED, children: ['nothing switched on'] })]
+          : lines.map((line, i) =>
+              Text({ color: FG, wrap: 'truncate-end', children: [`${i + 1}  ${line.map(p => p.text).join('  ')}`] }),
+            )),
+        Text({ children: [' '] }),
         Box({
           flexDirection: 'row',
-          columnGap: 1,
+          columnGap: 2,
           children: [
-            Text({ color: MUTED, children: ['effort:'] }),
             Button({
-              key: 'effort-up',
-              label: '\u{25B2}',
-              hotkey: '5',
-              dimColor: true,
-              onPress: () => rotateEffort($, 1),
+              key: 'reset',
+              label: 'defaults',
+              hotkey: 'r',
+              plain: true,
+              onPress: () => void resetLayout($),
             }),
-            Button({
-              key: 'effort-down',
-              label: '\u{25BC}',
-              hotkey: '4',
-              dimColor: true,
-              onPress: () => rotateEffort($, -1),
-            }),
-            sep(),
-            Button({
-              key: 'legend',
-              label: 'help',
-              hotkey: '0',
-              dimColor: true,
-              onPress: () =>
-                void $.ui.open({ id: PANE, title: 'Status line', focus: true, closeOnEscape: true }),
-            }),
+            Text({ color: MUTED, children: [`${ICON.dot} esc closes ${ICON.dot} /sl-help for the legend`] }),
           ],
         }),
-        ...(e.props.hint ? [Text({ color: MUTED, children: [e.props.hint] })] : []),
       ],
     })
   })
 
   // The legend. A pane rather than a toast: a toast is gone in four seconds and
-  // this is a page to read. Esc closes it, and it is drawn from the same values
-  // the band uses, so it cannot describe a row the band is not showing.
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  // this is a page to read. It is drawn from the same values the band uses, so
+  // it cannot describe a row the band is not showing.
+  on('ui.render', { component: 'Pane', requestId: LEGEND }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const row = (left: string, right: string) =>
+    const line = (left: string, right: string) =>
       Box({
         flexDirection: 'row',
         children: [
@@ -602,47 +934,46 @@ export const register: Register = on => {
     return Box({
       flexDirection: 'column',
       children: [
-        Text({ color: BLUE, bold: true, children: ['Row one -- what this session is'] }),
-        row(`${ICON.folder}  folder`, 'the working directory, last segment only'),
-        row(`${ICON.model}  model`, 'the model, with the effort it is sending'),
-        row(
-          `${ICON.branch}  branch`,
-          `${ICON.clean} clean, ${ICON.dirty} uncommitted changes, ${ICON.ahead} ahead of upstream`,
+        Text({ color: BLUE, bold: true, children: ['What can be on the band'] }),
+        ...ITEMS.map(item =>
+          line(`${item.name} (${item.hotkey})`, `${item.about} ${ICON.dot} ${layout[item.key] > 0 ? `line ${layout[item.key]}` : 'off'}`),
         ),
-        gap,
-        Text({ color: BLUE, bold: true, children: ['Row two -- what it has spent'] }),
-        row(LABEL.context, 'how full the context window is'),
-        row(LABEL.five_hour, 'the five-hour window'),
-        row(LABEL.seven_day, 'the seven-day window'),
-        row('fable', 'a window scoped to one model, labelled with that model'),
-        row('<kind>', 'any other window the engine reports, under its own name'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
-        row('\u{25B0}\u{25B1}\u{25B1}\u{25B1}\u{25B1}  1-20%', 'five segments of 20%, rounded UP'),
-        row('\u{25B0}\u{25B0}\u{25B1}\u{25B1}\u{25B1}  21-40%', 'so 19% shows one segment, never none'),
-        row('\u{25B0}\u{25B0}\u{25B0}\u{25B0}\u{25B0}  81-100%', 'a quota must not read lower than it is'),
-        row('colour', 'green under 60%, amber from 60, red from 85'),
+        line(`${bar(10)}  1-20%`, 'five segments of 20%, rounded UP'),
+        line(`${bar(30)}  21-40%`, 'so 19% shows one segment, never none'),
+        line(`${bar(90)}  81-100%`, 'a quota must not read lower than it is'),
+        line('colour', 'green under 60%, amber from 60, red from 85'),
+        line('ch', `cache hit, drawn only under ${CACHE_ALERT_BELOW}% -- above that it has nothing to say`),
         gap,
-        Text({ color: BLUE, bold: true, children: ['Effort'] }),
-        row(
-          '\u{25AE}\u{25AE}\u{25AF}\u{25AF}\u{25AF} (M)',
+        Text({ color: BLUE, bold: true, children: ['Row one'] }),
+        line(`${ICON.clean} ${ICON.dirty} ${ICON.ahead}`, 'clean, uncommitted changes, ahead of upstream'),
+        line(
+          `${EFFORT_FILLED.repeat(2)}${EFFORT_EMPTY.repeat(3)} (M)`,
           'a different glyph from the gauges on purpose: the level you picked, not what you spent',
         ),
-        row('L M H X \u{2726}', 'low, medium, high, xhigh, max'),
+        line(`L M H X ${EFFORT_LETTER.max}`, 'low, medium, high, xhigh, max'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
-        row('4 less  5 more', 'effort down, effort up -- the buttons under the prompt'),
-        row('0 help', 'open this legend; the buttons are clickable too'),
-        row('/sl', 'hide or show the band'),
-        row('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
-        row('/sl-debug', 'print what the engine reports'),
-        row('Esc', 'close this pane'),
+        line(`effort: ${ICON.up} ${ICON.down}`, 'under the prompt, clicked -- the keys do not fire there'),
+        line('/sl', 'hide or show the band'),
+        line('/sl-settings', 'choose what shows, and on which line'),
+        line('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
+        line('/sl-debug', 'print what the engine reports'),
+        line('Esc', 'close this pane'),
         gap,
         Text({
           color: MUTED,
           wrap: 'wrap',
           children: [
             'Effort is blank until the first model request: the engine does not hand a mod the session setting, only what each request carries.',
+          ],
+        }),
+        Text({
+          color: MUTED,
+          wrap: 'wrap',
+          children: [
+            'input and output are token counts, not dollars. The engine hands a mod one money figure -- the session total -- and no split between the two, and a price table in a mod is a number that goes wrong silently.',
           ],
         }),
       ],

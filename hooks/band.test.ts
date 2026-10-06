@@ -1,4 +1,4 @@
-import type { On } from 'claude-code'
+import type { On, SessionUsage } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 // The band has to draw on every surface it claims, and the rotate keys have to
@@ -26,12 +26,25 @@ const HINT = {
   props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
 }
 
+const SETTINGS = {
+  component: 'Pane' as const,
+  requestId: 'sl-settings',
+  props: {
+    title: 'sl settings',
+    isFocused: true,
+    bodyColumns: 100,
+    placement: 'inline' as const,
+    scroll: { offset: 0, bodyRows: 30 },
+    view: {},
+  },
+}
+
 const SURFACES = ['terminal', 'desktop'] as const
 
 // Nothing sits beneath the plugin in a test, so the test is the engine: every
 // call the mod makes has to be answered here or its hook is skipped. `mock`
 // covers clock, store and env; the rest is spelled out.
-const stand = (on: On, now?: number) => {
+const stand = (on: On, now?: number, usage?: SessionUsage) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
   // load with `on("clock.now") registered twice`.
@@ -40,7 +53,7 @@ const stand = (on: On, now?: number) => {
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
   on('session.usage', () => ({
-    value: {
+    value: usage ?? {
       startedAt: 0,
       context: { tokens: 660000, window: 1000000, percent: 66 },
       rateLimits: [
@@ -51,6 +64,15 @@ const stand = (on: On, now?: number) => {
     },
   }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  // refreshVersion walks a chain of files and falls through to a git tag. Only
+  // the plugin manifest answers, so the version cell reads the mod's own
+  // version -- which is what it does in this repo.
+  // Matched by suffix: the engine may resolve the relative path before the
+  // event is raised, so an equality check on the spelling the mod passed is not
+  // safe.
+  on('fs.exists', ($, e) => ({ value: e.path.endsWith('plugin.json') }))
+  // `fs.read` answers the text itself, not an object wrapping it.
+  on('fs.read', () => ({ value: '{"name":"sl-mod","version":"0.1.0"}' }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   // A clean branch, in the --porcelain=v2 shape refreshGit parses.
   on('process.run', () => ({
@@ -71,6 +93,11 @@ const stand = (on: On, now?: number) => {
   // The bottom of the classic chain too, so the mod's own hook on it can run.
   on('classic.SessionStart', () => ({}))
 
+  // The bottom of the measurement chain, so a test can push a figure. It has to
+  // echo the event: a result without `changed` is refused and the mod's own hook
+  // is skipped with it.
+  on('session.measure', ($, e) => ({ ...e }))
+
   // `ui.invalidate` is deliberately NOT stubbed. Answering it from here swallows
   // the redraw, so a Button's press changes state and the test still reads the
   // tree from before it. The harness answers it properly; let it.
@@ -90,26 +117,37 @@ test('the band draws on every surface, not just the terminal', async ($, on) => 
   }
 })
 
-test('the controls draw under the prompt, with the engine line kept', async ($, on) => {
+test('the controls draw under the prompt, on every surface', async ($, on) => {
   stand(on)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'sl-mod', surface, ...HINT })
 
-    // All three, by the keys the hotkeys are bound to.
-    for (const key of ['effort-down', 'effort-up', 'legend']) {
+    expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeDefined()
+    for (const key of ['effort-up', 'effort-down']) {
       expect(await ui.find({ key })).toBeDefined()
     }
 
-    // Two rows: the controls on their own, the engine's line under them. A
-    // tree replaces the line rather than adding to it, so the engine's text
-    // has to be carried across by hand. Dropping it is the easy mistake and it
-    // takes `esc to interrupt` with it.
-    expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /\? for shortcuts/ })).toBeDefined()
-
     await ui.unmount()
   }
+})
+
+test('while a turn runs the engine keeps its own hint line', async ($, on) => {
+  stand(on)
+
+  // `esc to interrupt` lives in that line and is worth more than two buttons.
+  // A tree here replaces the line rather than adding to it, so the only way to
+  // leave it alone is not to draw.
+  const ui = await $.ui.mount({
+    plugin: 'sl-mod',
+    surface: 'terminal',
+    component: 'PromptHint',
+    props: { ...HINT.props, isWorking: true, hint: 'esc to interrupt' },
+  })
+
+  expect(await ui.find({ type: 'Text', text: /effort:/ })).toBeUndefined()
+
+  await ui.unmount()
 })
 
 test('rotating effort marks the row, so the band shows what will be sent', async ($, on) => {
@@ -121,7 +159,7 @@ test('rotating effort marks the row, so the band shows what will be sent', async
   expect(await band.find({ type: 'Text', text: /\((L|M|H|X|✦)\)/ })).toBeUndefined()
 
   // The button that moves it is under the prompt now, and the band has to
-  // redraw off a press that happened on another surface entirely.
+  // redraw off a press that landed on another render site entirely.
   const hint = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...HINT })
   await hint.press({ key: 'effort-up' })
 
@@ -251,5 +289,84 @@ test('a 429 stops the polling instead of hammering a limited endpoint', async ($
   // And the band still shows the engine's live windows meanwhile.
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// --- the layout, and the settings pane that writes it ------------------------
+
+test('the version cell reads the open project, not the engine', async ($, on) => {
+  stand(on)
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  // 0.1.0 is the mod's own manifest, which is what this repo declares. Not
+  // 2.1.289: claude-powerline's version segment shows the engine's version, and
+  // that is the one thing this cell is deliberately not.
+  expect(await ui.find({ type: 'Text', text: /0\.1\.0/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('switching an item off in the settings pane takes it off the band', async ($, on) => {
+  stand(on)
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const band = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /0\.1\.0/ })).toBeDefined()
+
+  // version starts on line 1, so four presses walk it 2, 3, 4, off.
+  const pane = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...SETTINGS })
+  for (let i = 0; i < 4; i += 1) await pane.press({ key: 'item-version' })
+
+  expect(await band.find({ type: 'Text', text: /0\.1\.0/ })).toBeUndefined()
+
+  // One more press wraps it back onto line 1. The cycle is the whole interface
+  // -- one key per item, no cursor -- so a wrap that does not come round is the
+  // way out of the pane disappearing.
+  await pane.press({ key: 'item-version' })
+  expect(await band.find({ type: 'Text', text: /0\.1\.0/ })).toBeDefined()
+
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('the cache cell says nothing while the cache is healthy', async ($, on) => {
+  // 95% read from cache. A cell here would be a permanent 95% that costs width
+  // and tells nobody anything; the number only speaks when it falls. The usage
+  // stand-in is passed to `stand` rather than registered here: a second
+  // on('session.usage') fails the module load outright.
+  stand(on, undefined, {
+    startedAt: 0,
+    context: {
+      tokens: 660000,
+      window: 1000000,
+      percent: 66,
+      breakdown: {
+        apiUsage: {
+          input_tokens: 5000,
+          output_tokens: 1200,
+          cache_read_input_tokens: 95000,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    },
+    rateLimits: [],
+    cost: { usd: 1 },
+    // Cast rather than filled in: a real breakdown carries twelve more fields
+    // and the mod reads exactly one of them. Writing the other twelve would be
+    // inventing a fixture nobody checks.
+  } as unknown as SessionUsage)
+
+  await $.session.measure({
+    context: { tokens: 660000, window: 1000000, percent: 66 },
+    rateLimits: [],
+    cost: { usd: 1 },
+    changed: ['cost'],
+  })
+
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /ch \d+%/ })).toBeUndefined()
+
   await ui.unmount()
 })

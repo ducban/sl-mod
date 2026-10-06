@@ -17,16 +17,15 @@ it. The two lines move; they do not stay where `statusLine` put them.
 ## What it shows
 
 ```
-  arch     Opus 5 ▮▮▮▯▯ (H)    main ✓
+  arch     Opus 5 ▮▮▮▯▯ (H)    main ✓   ⌂ 0.1.0
  ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
 
  > │
-   effort: [▲] [▼] · [help]
-   ⏵⏵ auto mode on · (shift+tab to cycle) · ← for agents
+   effort: [▲] [▼]
 ```
 
-Line one is identity, line two is budget, and the controls sit in the engine's
-own hint line under the prompt.
+Up to four lines, and what sits on which is set in `/sl-settings`. The default
+is identity on line one, budget on line two, and the controls under the prompt.
 Each bar is five segments of 20%, rounded **up**, so 19% shows one segment
 rather than none — a quota must never read lower than it is.
 
@@ -47,17 +46,84 @@ number.
 
 ## State
 
-Both rows draw. `4` and `5` rotate effort, `0` opens the legend, and `/sl`,
-`/sl-help`, `/sl-effort` and `/sl-debug` work. Eight tests pass under
-`claude plugin test`.
+Up to four lines draw, set in `/sl-settings`. `/sl`, `/sl-help`, `/sl-settings`,
+`/sl-effort` and `/sl-debug` work. Twelve tests pass under `claude plugin test`,
+`tsc -p .` is clean and `claude plugin validate` passes.
 
-The controls sit under the prompt, on a row of their own above the engine's
-hint line. Measured, not assumed: `4`, `5` and `0` **do not fire** there. The
-types say a bare digit from an empty composer presses a band Button and only a
-band Button, and that is what happens. The hotkeys stay registered in case the
-site is ever focusable, and they are not drawn — advertising a key that does
-nothing is worse than no key. Clicking works, and `/sl-effort <level>` sets the
-level outright.
+## The hint line is one row
+
+Tried and failed: a `flexDirection: 'column'` tree at `PromptHint` does **not**
+give two rows. A tree carrying both the controls and the engine's own `hint`
+string came out as one wrapped line with the engine's text broken across it:
+
+```
+⏵⏵ auto mode on · effort: [ ▲ ] [ ▼ ] · [ help ]
+                    (shift+tab to cycle)
+```
+
+So the controls are drawn alone, and only while the session is idle. While a
+turn runs the hook passes and the engine keeps its line, because `esc to
+interrupt` is worth more than two buttons.
+
+`4`, `5` and `0` **do not fire** there either — measured, not assumed. The types
+say a bare digit from an empty composer presses a band Button and only a band
+Button, and that is what happens. The hotkeys stay registered in case the site
+is ever focusable, and they are not drawn: advertising a key that does nothing
+is worse than no key. The buttons are clicked, `/sl-settings` and `/sl-help`
+open as two tabs of one pane, and `/sl-effort <level>` sets the level outright.
+
+If a genuine second row under the prompt is wanted, the only site that gives one
+is the band itself — which puts it above the prompt, not below.
+
+## What goes where
+
+`/sl-settings` draws one row per item. Its key moves that item on: line 1, 2, 3,
+4, off, and round again. One key per item and no cursor to lose.
+
+The layout is stored in `$.store`, so it is per machine and outlives the
+session.
+
+Two rules the pane obeys:
+
+- An item switched **on** whose data is missing draws nothing. An empty bar
+  reads as "nothing spent yet", which is the same green-because-it-was-attempted
+  reading this repo keeps finding elsewhere.
+- A line with nothing on it is dropped, not left as a gap.
+
+### cache hit
+
+`ch` is drawn only under **70%**. Above that it reads 98–100% and says nothing,
+and a permanent cell for a constant is spent width. It is also the one figure
+here that reports the past: by the time it drops, the money is gone.
+
+It is summed over the session rather than read off the last response, which
+needs a dedup signal — `session.measure` naming `cost` in `changed`, the
+engine's own word for "a priced response landed".
+
+### input and output are tokens, not dollars
+
+The engine hands a mod one money figure: the session total, `cost.usd`, with no
+split between input and output. Turning tokens into dollars would mean a price
+table in this file, and a price table in a file is a number that goes wrong
+silently the day the prices change. So `i` and `o` are token counts and `$` is
+the session total.
+
+The lifetime figures (`$470.66`, `587.4M tokens`) are out of reach entirely:
+they need either the transcript scan this mod exists to avoid, or `ccuc`, which
+is not on every machine.
+
+### version
+
+`⌂ 0.1.0` is the **open project's** version, not the engine's, read in this
+order: `package.json`, `.claude-plugin/plugin.json`, `pyproject.toml`,
+`Cargo.toml`, then `git describe --tags`. Nothing found means no cell — `⌂ ?`
+says less than nothing does.
+
+A version from a git tag gets `+N` when HEAD has moved past it, because then the
+thing running is not the thing the tag names. A version from a file gets no
+mark: in claude-powerline `✓` is the **git-clean** symbol, and the git cell two
+along already draws that. (Its own version segment shows `hookData.version`,
+i.e. Claude Code's version, with no tick at all.)
 
 ## Run it
 
@@ -82,10 +148,22 @@ The old `statusLine` command was removed from `~/.claude/settings.json` on
 ## Icons on row one, words on row two
 
 Row one takes Nerd Font icons. They draw a shade smaller than the text beside
-them and a mod can't fix that: JetBrains Mono carries none of them, so each is
-drawn by whichever fallback font fontconfig reaches, at that font's metrics. It
-has `◔ ■ □ █ ░ │ · ✓ ●` and not `▰ ▱ ▮ ▯` or anything in the Nerd Font private
-use area. Choosing the font is the terminal's call, not the mod's.
+them and a mod can't fix that: a mod does not choose the font. A glyph JetBrains
+Mono does not carry is drawn by whichever fallback font fontconfig reaches, at
+that font's metrics.
+
+Measured with `fc-list :charset=<cp>`, so it is checkable rather than folklore:
+
+| | in JetBrains Mono | from a fallback font |
+|---|---|---|
+| icons | `⌂ ✓ ● ⇡ ▲ ▼ ·` and ``  (E0B0) | ``  ``  `` (Nerd Font PUA) |
+| gauges | `■ □ █ ░ ▓` | `▰ ▱` (in use), `▮ ▯` (effort) |
+
+Two things fall out of that table. The powerline separator **is** in JetBrains
+Mono, so it draws at the right size — it was simply missing, as an empty string,
+for four commits. And both bar pairs in use are fallback glyphs: `██░░░` or
+`■■□□□` would be the same-size swap, one line each, not taken because the
+current pair was asked for.
 
 Row two takes words — `ct`, `5h`, `7d`, and the model's own name for a scoped
 window. A word renders at the row's own size, and the budget row is the half
