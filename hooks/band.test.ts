@@ -25,9 +25,11 @@ const SURFACES = ['terminal', 'desktop'] as const
 // Nothing sits beneath the plugin in a test, so the test is the engine: every
 // call the mod makes has to be answered here or its hook is skipped. `mock`
 // covers clock, store and env; the rest is spelled out.
-const stand = (on: On) => {
+const stand = (on: On, now?: number) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
-  mock.clock(on)
+  // Registered exactly once per test: a second mock.clock(on) fails the module
+  // load with `on("clock.now") registered twice`.
+  mock.clock(on, now === undefined ? undefined : { now })
   mock.store(on)
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
@@ -59,6 +61,9 @@ const stand = (on: On) => {
   // refused with "returned something that is not a tree element", and then the
   // mod's own hook is skipped too, so the failure reads as the mod's.
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
+
+  // The bottom of the classic chain too, so the mod's own hook on it can run.
+  on('classic.SessionStart', () => ({}))
 
   // `ui.invalidate` is deliberately NOT stubbed. Answering it from here swallows
   // the redraw, so a Button's press changes state and the test still reads the
@@ -112,6 +117,91 @@ test('the band stands aside for a survey', async ($, on) => {
   })
 
   expect(await ui.find({ type: 'Text', text: /Opus|Sonnet|Haiku|Fable/ })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+// --- the ccuc-remote source, and the three ways it can have nothing to say ----
+// These are the paths no running session will show clearly: a bar that is absent
+// looks the same whether the data was missing or the code was wrong.
+
+const HOME = '/home/test'
+const ACCOUNT = JSON.stringify({ oauthAccount: { emailAddress: 'A@Example.com' } })
+const BOOK = '\u{F02D}' // the per-model window's icon
+
+// A reply shaped like the agreed contract, with the per-model week in it.
+const reply = (lastOkAt: string) =>
+  JSON.stringify({
+    schema: 1,
+    served_at: lastOkAt,
+    as_of: lastOkAt,
+    account: { label: 'a', email: 'a@example.com', uuid: 'u' },
+    reported_by: 'linode',
+    fetch: { status: 'ok', last_ok_at: lastOkAt, error: null },
+    windows: [
+      { kind: 'session', scope: null, percent: 8, resets_at: lastOkAt },
+      { kind: 'weekly_all', scope: null, percent: 36, resets_at: lastOkAt },
+      { kind: 'weekly_scoped', scope: 'Fable', percent: 25, resets_at: lastOkAt },
+    ],
+  })
+
+const remoteStand = (on: On, opts: { token?: string; body?: string; status?: number }) => {
+  mock.env(on, { HOME })
+  on('fs.read', ($, e) => {
+    if (e.path.endsWith('/.ccuc/read-token')) {
+      return opts.token === undefined ? { deny: 'ENOENT' } : { value: opts.token }
+    }
+    if (e.path.endsWith('/.claude.json')) return { value: ACCOUNT }
+
+    return { deny: 'ENOENT' }
+  })
+  on('http.fetch', () => ({
+    value: {
+      status: opts.status ?? 200,
+      ok: (opts.status ?? 200) < 400,
+      headers: {},
+      text: opts.body ?? '',
+    },
+  }))
+}
+
+test('with no token the band falls back to the live windows, not to zeroes', async ($, on) => {
+  stand(on)
+  remoteStand(on, {})
+
+  // The mount only draws; this is what fills the readings in.
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  // The two live windows are there, and the per-model one is not invented.
+  expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('a fresh reply adds the per-model week', async ($, on) => {
+  stand(on, Date.parse('2026-10-06T12:00:00Z'))
+  remoteStand(on, { token: 't', body: reply('2026-10-06T11:59:00Z') })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  expect(await ui.find({ type: 'Text', text: new RegExp(`${BOOK}.*25%`) })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a reply older than the staleness bound is not drawn at all', async ($, on) => {
+  stand(on, Date.parse('2026-10-06T12:00:00Z'))
+  // 20 minutes old, past the 15-minute bound.
+  remoteStand(on, { token: 't', body: reply('2026-10-06T11:40:00Z') })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  expect(await ui.find({ type: 'Text', text: new RegExp(BOOK) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /36%/ })).toBeDefined()
 
   await ui.unmount()
 })

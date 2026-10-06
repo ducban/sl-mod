@@ -124,8 +124,12 @@ const ICON = NERD
       window: '\u{2756}', // ❖
     }
 
-const iconFor = (kind: string) =>
-  kind === 'five_hour'
+const iconFor = (kind: string, scope?: string | null) =>
+  // A window scoped to a model is the per-model week, whatever the engine or
+  // ccuc ends up calling its kind. The scope decides, not the name.
+  scope
+    ? ICON.window
+    : kind === 'five_hour'
     ? ICON.five_hour
     : kind === 'seven_day'
       ? ICON.seven_day
@@ -136,7 +140,7 @@ const iconFor = (kind: string) =>
 // --- What the drawing reads --------------------------------------------------
 // Module-level, so a redraw costs nothing. They go back to their defaults when
 // the module reloads, and each is filled again by the hook that owns it.
-type Window = { kind: string; percentUsed: number }
+type Window = { kind: string; percentUsed: number; scope?: string | null }
 type Effort = (typeof EFFORT_STEPS)[number]
 let contextPercent: number | null = null
 let windows: Window[] = []
@@ -155,6 +159,134 @@ let isHidden = false
 let effortOverride: Effort | null = null
 
 const PANE = 'sl-legend'
+
+// --- The ccuc-remote source --------------------------------------------------
+// The engine hands a mod two windows, `five_hour` and `seven_day`. The per-model
+// week -- "Current week (Fable)" in `/usage` -- never reaches a mod or the status
+// line payload: the engine filters it out of both. ccuc already fetches it, so
+// ccuc-remote serves it back, and it serves every window at once rather than just
+// the missing one, so what the band draws comes from one reading.
+//
+// Querying by this machine's own account is what makes that safe. Three machines
+// push to ccuc-remote; asking for someone else's account would draw their
+// numbers under this prompt.
+const REMOTE_URL = 'https://ccuc.hiem.co/api/usage'
+const POLL_MS = 180_000
+// Past this, the remote reading is not drawn at all and the engine's two live
+// windows are used instead. Fewer bars is honest; a stale bar is not.
+const REMOTE_STALE_MS = 15 * 60_000
+
+type Remote = {
+  windows: Window[]
+  lastOkAt: number | null // when the numbers were measured
+  asOf: number | null // when any machine last reported -- is the pipeline alive
+  reportedBy: string | null
+  note: string // why there is nothing to draw, in words, for /sl-debug
+}
+let remote: Remote = { windows: [], lastOkAt: null, asOf: null, reportedBy: null, note: 'not fetched yet' }
+
+const msOf = (iso: unknown) => {
+  if (typeof iso !== 'string') return null
+  const at = Date.parse(iso)
+  return Number.isNaN(at) ? null : at
+}
+
+// Reads are attempted every cycle rather than cached, so creating the token file
+// or logging into another account takes effect without restarting Claude Code.
+async function readLine($: EngineInterface, path: string) {
+  try {
+    const got = await $.fs.read(path)
+    return typeof got === 'string' ? got.trim() : null
+  } catch {
+    return null
+  }
+}
+
+async function refreshRemote($: EngineInterface) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const token = await readLine($, `${home}/.ccuc/read-token`)
+  if (!token) {
+    remote = { ...remote, note: `no token at ~/.ccuc/read-token` }
+
+    return
+  }
+
+  // The account this machine is logged into, not whichever one ccuc favours.
+  // ~/.claude.json holds account metadata and no credential of any kind.
+  const raw = await readLine($, `${home}/.claude.json`)
+  let email: string | null = null
+  try {
+    email = raw ? (JSON.parse(raw)?.oauthAccount?.emailAddress ?? null) : null
+  } catch {
+    email = null
+  }
+  if (!email) {
+    remote = { ...remote, note: 'no account email in ~/.claude.json' }
+
+    return
+  }
+
+  let res
+  try {
+    res = await $.http.fetch(REMOTE_URL, {
+      headers: { 'X-Ccuc-Account': email.toLowerCase(), Authorization: `Bearer ${token}` },
+    })
+  } catch (err) {
+    // Keep whatever was last good; only the note changes.
+    remote = { ...remote, note: `unreachable: ${String(err).slice(0, 80)}` }
+
+    return
+  }
+  if (!res.ok) {
+    remote = { ...remote, note: `http ${res.status}` }
+
+    return
+  }
+
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(res.text) as Record<string, unknown>
+  } catch {
+    remote = { ...remote, note: 'response was not JSON' }
+
+    return
+  }
+  // An unknown schema is refused rather than guessed at: fields are only added
+  // within a schema, so a bump means something was renamed or removed.
+  if (body.schema !== 1) {
+    remote = { ...remote, note: `unknown schema ${String(body.schema)}` }
+
+    return
+  }
+
+  const lastOkAt = msOf(body.last_ok_at ?? (body.fetch as Record<string, unknown> | undefined)?.last_ok_at)
+  const list = Array.isArray(body.windows) ? body.windows : []
+  // last_ok_at null means no machine has ever fetched this account: there are no
+  // numbers, and drawing zeroes would be inventing them.
+  remote = {
+    windows:
+      lastOkAt === null
+        ? []
+        : list.flatMap(w => {
+            const one = w as Record<string, unknown>
+            const kind = typeof one.kind === 'string' ? one.kind : null
+            const percent = typeof one.percent === 'number' ? one.percent : null
+            if (kind === null || percent === null) return []
+            // ccuc sends `scope` as a flat string; the engine's own cache sends
+            // `{ model: { display_name } }`. Normalise, so a future second
+            // source cannot change what a bar is labelled.
+            const scope =
+              typeof one.scope === 'string'
+                ? one.scope
+                : ((one.scope as Record<string, any> | null)?.model?.display_name ?? null)
+            return [{ kind, percentUsed: percent, scope }]
+          }),
+    lastOkAt,
+    asOf: msOf(body.as_of),
+    reportedBy: typeof body.reported_by === 'string' ? body.reported_by : null,
+    note: lastOkAt === null ? 'reachable, but no machine has fetched this account yet' : '',
+  }
+}
 
 // A digit is the only key that reaches a band Button without the band having
 // keyboard focus, and only from an empty prompt -- every letter goes to the
@@ -216,6 +348,25 @@ export const register: Register = on => {
     // Git is the one figure nothing pushes, so it is the one thing polled --
     // off the draw path, where its cost does not show.
     $.clock.every(5000, () => void refreshGit($))
+
+    // ccuc-remote changes every ~5 minutes, so 180 s is ample. Also off the draw
+    // path: a network call must never sit between a keystroke and a frame.
+    void refreshRemote($)
+    $.clock.every(POLL_MS, () => void refreshRemote($))
+
+    return next(e)
+  })
+
+  // `session.start` does not fire after /clear, /resume or /branch -- the guide
+  // is explicit about it -- so the readings would quietly age from whenever the
+  // session began. This picks them up again. It also happens to be the only
+  // event a test can raise, which is how the remote paths below are covered.
+  on('classic.SessionStart', async ($, e, next) => {
+    const usage = await $.session.usage()
+    contextPercent = usage.context.percent ?? null
+    windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    await refreshGit($)
+    await refreshRemote($)
 
     return next(e)
   })
@@ -286,6 +437,10 @@ export const register: Register = on => {
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,
         `git: branch=${branch} dirty=${isDirty} ahead=${isAhead}`,
+        `remote: ${remote.windows.length} window(s), reported_by=${remote.reportedBy ?? '-'}`,
+        `  last_ok_at=${remote.lastOkAt === null ? 'null' : new Date(remote.lastOkAt).toISOString()}`,
+        `  as_of=${remote.asOf === null ? 'null' : new Date(remote.asOf).toISOString()}`,
+        `  note=${remote.note || 'ok'}`,
       ].join('\n'),
     }
   })
@@ -372,18 +527,28 @@ export const register: Register = on => {
       }),
     ]
 
+    // Which reading to draw. The remote one is preferred because it is the only
+    // one carrying the per-model week, but only while it is fresh: past the
+    // staleness bound the engine's two live windows are used instead. Fewer bars
+    // is honest, a bar holding a number from an hour ago is not.
+    const now = await $.clock.now()
+    const remoteAge = remote.lastOkAt === null ? null : now - remote.lastOkAt
+    const useRemote =
+      remote.windows.length > 0 && remoteAge !== null && remoteAge < REMOTE_STALE_MS
+    const shown = useRemote ? remote.windows : windows
+
     // Every gauge means the same thing -- how much of an allowance is gone --
     // so they can sit in one row and be read at a glance.
     const gauges = [
       ...(contextPercent === null
         ? []
         : cell(bg(0), bg(1), FG, `${ICON.context} ${bar(contextPercent)} ${contextPercent}%`)),
-      ...windows.flatMap((w, i) =>
+      ...shown.flatMap((w, i) =>
         cell(
           bg(i + 1),
           bg(i + 2),
           barColor(w.percentUsed),
-          `${iconFor(w.kind)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+          `${iconFor(w.kind, w.scope)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
         ),
       ),
     ]
