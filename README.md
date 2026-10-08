@@ -256,9 +256,22 @@ down, and it was read past every time.
 
 ## The statusLine it replaced
 
-The old `statusLine` command was removed from `~/.claude/settings.json` on
-2026-10-06 so the band is the only status line in the window. To put
-`claude-powerline` back, the block was:
+Two things held that slot before this mod, not one.
+
+`reference/statusline-command.sh` is the first: 92 lines of bash Ban wrote by
+hand, reading the engine's JSON on stdin with `jq`. Its shape is the shape of
+this mod -- line one `folder | model | Ctx:%`, line two `5h` and `7d` with the
+reset time and a countdown -- which is why it is kept here rather than thrown
+away. It was the only copy; no repo on either machine tracked it, and it sat
+unread in `~/.claude/` after the `statusLine` block went. It is archived, not
+wired to anything: nothing in this mod reads it.
+
+It also shows the cost the mod exists to remove. Every redraw forked `bash`,
+then `jq` five times over, plus `awk` and `date` per field.
+
+`claude-powerline` came after it and was removed from `~/.claude/settings.json`
+on 2026-10-06, so the band is the only status line in the window now. To put
+that one back, the block was:
 
 ```json
 "statusLine": {
