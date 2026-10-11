@@ -38,6 +38,15 @@ spends it against a first-party host. The credential never reaches the mod, whic
 also means the mod never refreshes it — so the token rotation that can cost you a
 Claude Code session isn't in play. Nothing to install, on any machine.
 
+One reading per machine, not per session. Each open session runs its own copy
+of this mod with its own three-minute timer, so four sessions made four calls a
+period against one token, plus one per session start, and the endpoint's limit
+is per token: on 2026-10-11 that kept one Mac at 429 for hours while the same
+account from another machine answered 200. The reading now lives in `$.store`,
+which every session on the box shares: whoever finds it older than three minutes
+fetches and writes it back, everyone else adopts it, and a 429's backoff is
+shared the same way. `/sl-debug` prints `source=` so you can see which it was.
+
 When that reading is older than fifteen minutes it isn't drawn, and the engine's
 two live windows are used instead. Two bars beat three bars holding an old
 number.
@@ -64,8 +73,8 @@ on. The backstop and its guard are tested.
 
 ## State
 
-Version 0.1.2, installed from this repo's own marketplace at scope **user**, so
-it draws in every session on this box. All five commands work. Fourteen tests
+Version 0.1.3, installed from this repo's own marketplace at scope **user**, so
+it draws in every session on this box. All five commands work. Seventeen tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.
 

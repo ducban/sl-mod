@@ -292,6 +292,9 @@ type Reading = {
   note: string // why there's nothing, in words, for /sl-debug
 }
 let reading: Reading = { windows: [], at: null, note: 'not fetched yet' }
+// Where the current reading came from, for /sl-debug: this session's own
+// fetch, or another session's through the shared store.
+let readingSource = 'none'
 
 // Anthropic rate-limits this endpoint, and this mod is not the only caller: ccuc
 // polls the same account from three machines every five minutes, and a mod runs
@@ -301,8 +304,45 @@ let nextAllowedAt = 0
 const DEFAULT_BACKOFF_MS = 10 * 60_000
 const MAX_BACKOFF_MS = 60 * 60_000
 
+// One reading per machine, not per session. Every open session runs its own
+// copy of this mod with its own POLL_MS timer, so N sessions made N calls per
+// period against one token, plus one per session start -- and the endpoint's
+// limit is per token: on 2026-10-11 four sessions plus ccuc on one Mac kept it
+// at 429 for hours while the same account from another machine answered 200.
+// $.store is one file per machine that every session shares, so the reading
+// lives there: whoever finds it older than POLL_MS fetches and writes it back,
+// everyone else adopts it. The 429 backoff is shared the same way, so one 429
+// silences the machine, not one session. The get-then-set race the docs warn
+// about is real but cheap here: timers in different sessions are out of phase,
+// so at worst two sessions fetch inside one call's ~200 ms, not N.
+//
+// Both times are $.clock.now(), which the contract defines as milliseconds
+// since the epoch, so one session's fetchedAt and nextAllowedAt read correctly
+// in another. The tests run on the mock clock for the same reason.
+type SharedUsage = { windows: Window[]; fetchedAt: number; nextAllowedAt: number }
+const SHARED_KEY = 'usage'
+
 async function refreshUsage($: EngineInterface) {
   const now = await $.clock.now()
+
+  const shared = (await $.store.get(SHARED_KEY)) as SharedUsage | undefined
+  if (shared && typeof shared.fetchedAt === 'number' && Array.isArray(shared.windows)) {
+    const age = now - shared.fetchedAt
+    if (age >= 0 && age < POLL_MS) {
+      reading = {
+        windows: shared.windows,
+        at: shared.windows.length > 0 ? shared.fetchedAt : null,
+        note: shared.windows.length > 0 ? '' : 'the body carried no windows',
+      }
+      readingSource = `shared, fetched ${Math.round(age / 1000)}s ago by another session`
+
+      return
+    }
+    if (typeof shared.nextAllowedAt === 'number' && shared.nextAllowedAt > nextAllowedAt) {
+      nextAllowedAt = shared.nextAllowedAt
+    }
+  }
+
   if (now < nextAllowedAt) {
     reading = {
       ...reading,
@@ -348,6 +388,12 @@ async function refreshUsage($: EngineInterface) {
         Number.isFinite(asked) && asked > 0 ? Math.min(asked * 1000, MAX_BACKOFF_MS) : DEFAULT_BACKOFF_MS
       nextAllowedAt = now + wait
       reading = { ...reading, note: `rate limited, waiting ${Math.round(wait / 1000)}s` }
+      // Keep whatever reading the machine has; only the backoff moves.
+      await $.store.set(SHARED_KEY, {
+        windows: shared?.windows ?? reading.windows,
+        fetchedAt: shared?.fetchedAt ?? 0,
+        nextAllowedAt,
+      } satisfies SharedUsage)
 
       return
     }
@@ -387,6 +433,8 @@ async function refreshUsage($: EngineInterface) {
     at: fetched.length > 0 ? now : null,
     note: fetched.length > 0 ? '' : 'the body carried no windows',
   }
+  readingSource = 'fetched by this session'
+  await $.store.set(SHARED_KEY, { windows: fetched, fetchedAt: now, nextAllowedAt: 0 } satisfies SharedUsage)
 }
 
 // --- The open project's version ---------------------------------------------
@@ -883,6 +931,7 @@ export const register: Register = on => {
         `usage endpoint: ${reading.windows.length} window(s)`,
         ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
         `  note=${reading.note || 'ok'}`,
+        `  source=${readingSource}`,
       ].join('\n'),
     }
   })

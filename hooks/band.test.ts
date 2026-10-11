@@ -53,12 +53,15 @@ const stand = (
   // `on('ui.open')` in the test body fails the whole module load with
   // `on("ui.open") registered twice`, so the recorder has to live in here.
   opens?: { id: string; focus: boolean }[],
+  // What `$.store` holds when the session starts: another session's shared
+  // usage reading, for the tests that must not reach the network.
+  store?: Readonly<Record<string, unknown>>,
 ) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
   // load with `on("clock.now") registered twice`.
   mock.clock(on, now === undefined ? undefined : { now })
-  mock.store(on)
+  mock.store(on, store)
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
   on('session.usage', () => ({
@@ -277,6 +280,56 @@ test('a 401 keeps the live windows rather than blanking the row', async ($, on) 
   expect(await ui.find({ type: 'Text', text: new RegExp(SCOPED) })).toBeUndefined()
 
   await ui.unmount()
+})
+
+// Every session on the box shares one `$.store`, so a reading one session
+// fetched is the machine's reading. These three pin that: a fresh one is
+// adopted without a call, a backoff one session took holds for the others, and
+// a stale one is fetched again. Seeded through `stand`'s last argument.
+const SHARED = (at: number, nextAllowedAt = 0) => ({
+  usage: {
+    windows: [
+      { kind: 'session', percentUsed: 9, scope: null },
+      { kind: 'weekly_all', percentUsed: 39, scope: null },
+      { kind: 'weekly_scoped', percentUsed: 26, scope: 'Fable' },
+    ],
+    fetchedAt: at,
+    nextAllowedAt,
+  },
+})
+
+test('a reading another session fetched inside the poll period is adopted, not fetched again', async ($, on) => {
+  const T = Date.parse('2026-10-06T12:00:00Z')
+  stand(on, T, undefined, true, undefined, SHARED(T - 30_000))
+  const seen = endpoint(on, { body: reply() })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  expect(seen.calls()).toBe(0)
+
+  // And it is drawn as this session's own would be: the per-model week is there.
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`${SCOPED}.*26%`) })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a 429 one session took holds every session off the endpoint until the backoff ends', async ($, on) => {
+  const T = Date.parse('2026-10-06T12:00:00Z')
+  // Stale reading, so only the shared backoff can be what stops the call.
+  stand(on, T, undefined, true, undefined, SHARED(T - 10 * 60_000, T + 5 * 60_000))
+  const seen = endpoint(on, { body: reply() })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  expect(seen.calls()).toBe(0)
+})
+
+test('a shared reading older than the poll period is fetched again', async ($, on) => {
+  const T = Date.parse('2026-10-06T12:00:00Z')
+  stand(on, T, undefined, true, undefined, SHARED(T - 4 * 60_000))
+  const seen = endpoint(on, { body: reply() })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  expect(seen.calls()).toBe(1)
 })
 
 test('a 429 stops the polling instead of hammering a limited endpoint', async ($, on) => {
