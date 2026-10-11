@@ -208,6 +208,21 @@ claude plugin install sl-mod@sl-mod
 at scope **user**, which is what makes it global on the box rather than tied to
 one project.
 
+### Update
+
+A machine that already has it picks up a new version in two lines — the first
+re-clones the marketplace, the second swaps the installed copy:
+
+```bash
+claude plugin marketplace update sl-mod
+claude plugin update sl-mod
+```
+
+It prints the version it moved between, e.g. `updated from 0.1.2 to 0.1.3`, and
+then `Restart to apply changes`. That last part is literal: a session that is
+already open keeps running the old copy until it is reopened, so after an
+update, `/sl-debug` in an old session still describes the old code.
+
 An earlier attempt put a `CLAUDE_CODE_PLUGIN_DIRS` export in the shell's
 `.paths` instead. It was reverted: an absolute path in a per-machine shell file
 is three path strings across this box, the Mac and the VPS, three things to go
