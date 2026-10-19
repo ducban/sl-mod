@@ -202,6 +202,12 @@ let contextPercent: number | null = null
 // Kept so a compaction can recompute the percent from the token count it
 // reports. Every reading of usage carries it, so it costs nothing to hold.
 let contextWindow: number | null = null
+// Which hook last wrote the gauge, and when, for /sl-debug. A gauge that holds
+// an old number looks the same whether the engine stopped reporting or the band
+// stopped listening, and on 2026-10-19 it took another session's /context to
+// tell the two apart.
+let contextSource = 'none'
+let contextAt: number | null = null
 let windows: Window[] = []
 let effort: string | undefined
 let branch: string | null = null
@@ -559,6 +565,35 @@ async function sampleTokens($: EngineInterface) {
   }
 }
 
+// The fill as /context reports it: estimated locally over the transcript, no
+// request sent. It is the only figure that exists right after a compaction.
+// `context.percent` is "the last response's input against the window", and the
+// engine does not hold a stale one -- it drops the field, so `usage.context` is
+// `{ window }` and nothing else until the next response lands. Ban's session on
+// 2026-10-19: /context said 9%, the band said 20% from before the compaction,
+// and the backstop had asked, been given no `percent`, and kept what it had.
+//
+// It measures against the compaction window (`rawMaxTokens`), which can be
+// smaller than `window`, so it may read a point or two above `percent` for the
+// same transcript. That is also what /context shows, which is the number Ban
+// compares the band against.
+async function breakdownPercent($: EngineInterface): Promise<number | null> {
+  try {
+    const usage = await $.session.usage({ breakdown: 'summary' })
+    const p = usage.context.breakdown?.percentage
+
+    return typeof p === 'number' ? Math.round(p) : null
+  } catch {
+    return null
+  }
+}
+
+async function setContext($: EngineInterface, percent: number, source: string) {
+  contextPercent = percent
+  contextSource = source
+  contextAt = await $.clock.now()
+}
+
 // Effort is chosen outright, never nudged. Nudging needs a baseline, and the
 // baseline was a guess: the engine does not hand a mod the session's effort
 // until something reports it, so a relative press from an unknown start landed
@@ -745,7 +780,10 @@ export const register: Register = on => {
 
     // The first readings, before any measurement has been pushed.
     const usage = await $.session.usage()
-    contextPercent = usage.context.percent ?? null
+    contextWindow = usage.context.window ?? null
+    if (typeof usage.context.percent === 'number') {
+      await setContext($, usage.context.percent, 'session.start')
+    }
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = usage.cost?.usd ?? null
 
@@ -776,8 +814,10 @@ export const register: Register = on => {
   // event a test can raise, which is how the fallback paths below are covered.
   on('classic.SessionStart', async ($, e, next) => {
     const usage = await $.session.usage()
-    contextPercent = usage.context.percent ?? null
     contextWindow = usage.context.window ?? null
+    if (typeof usage.context.percent === 'number') {
+      await setContext($, usage.context.percent, 'classic.SessionStart')
+    }
     windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = usage.cost?.usd ?? null
     // Awaited here, not fired and forgotten: this is the only event a test can
@@ -793,7 +833,9 @@ export const register: Register = on => {
 
   // Pushed, not polled: this fires when a figure actually moves.
   on('session.measure', async ($, e, next) => {
-    contextPercent = e.context.percent ?? contextPercent
+    if (typeof e.context.percent === 'number') {
+      await setContext($, e.context.percent, 'session.measure')
+    }
     contextWindow = e.context.window ?? contextWindow
     windows = e.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
     costUsd = e.cost?.usd ?? costUsd
@@ -815,23 +857,41 @@ export const register: Register = on => {
   // answered over", and right after a compaction there has not been one yet.
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
-    if (done.skip === undefined && typeof done.tokensAfter === 'number' && contextWindow) {
-      contextPercent = Math.round((done.tokensAfter / contextWindow) * 100)
+    if (done.skip !== undefined) return done
+
+    if (typeof done.tokensAfter === 'number' && contextWindow) {
+      await setContext($, Math.round((done.tokensAfter / contextWindow) * 100), 'session.compact tokensAfter')
       $.ui.invalidate('ui.render')
+    } else {
+      const estimate = await breakdownPercent($)
+      if (estimate !== null) {
+        await setContext($, estimate, 'session.compact breakdown')
+        $.ui.invalidate('ui.render')
+      }
     }
 
     return done
   })
 
-  // The backstop, for a compaction that reports no token count: re-read, and
-  // take the answer only if it actually moved down. A reading that has not
-  // caught up yet is the pre-compaction one, and writing it back would just
-  // re-pin the stale number.
+  // The backstop, for a compaction the hook above did not see or could not
+  // size. The breakdown is the live estimate and is taken as it comes. Failing
+  // that, the plain reading is taken only if it moved DOWN: it is the last
+  // response's figure, and the only way it is present here is if it has not
+  // caught up yet, in which case it is the pre-compaction one and writing it
+  // back would re-pin the stale number.
   on('classic.PostCompact', async ($, e, next) => {
+    const estimate = await breakdownPercent($)
+    if (estimate !== null) {
+      await setContext($, estimate, 'classic.PostCompact breakdown')
+      $.ui.invalidate('ui.render')
+
+      return next(e)
+    }
+
     const usage = await $.session.usage()
     const now = usage.context.percent ?? null
     if (now !== null && (contextPercent === null || now < contextPercent)) {
-      contextPercent = now
+      await setContext($, now, 'classic.PostCompact percent')
       contextWindow = usage.context.window ?? contextWindow
       $.ui.invalidate('ui.render')
     }
@@ -913,13 +973,21 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'sl-debug' }, async $ => {
-    const [usage, model] = await Promise.all([$.session.usage(), $.session.model()])
+    const [usage, model, estimate, now] = await Promise.all([
+      $.session.usage(),
+      $.session.model(),
+      breakdownPercent($),
+      $.clock.now(),
+    ])
+    const age = contextAt === null ? '' : `, ${Math.round((now - contextAt) / 1000)}s ago`
 
     return {
       text: [
         `rateLimits: ${usage.rateLimits.length} entry(s)`,
         ...usage.rateLimits.map((w, i) => `  [${i}] ${JSON.stringify(w)}`),
         `context: ${JSON.stringify(usage.context)}`,
+        `  band ct: ${contextPercent === null ? 'none' : `${contextPercent}%`} window=${contextWindow ?? 'none'} from=${contextSource}${age}`,
+        `  breakdown (what /context shows): ${estimate === null ? 'none' : `${estimate}%`}`,
         `cost: ${JSON.stringify(usage.cost)}`,
         `model: ${model}`,
         `effort (from turn.step): ${effort ?? 'not seen yet'}`,

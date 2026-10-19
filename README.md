@@ -62,18 +62,39 @@ Two hooks cover it. `session.compact` takes the number off the compaction's own
 result (`tokensAfter`), which is the better source: asking again does not help on
 its own, because `context.tokens` is *"input tokens the last response was
 answered over"* and right after a compaction there has not been one.
-`classic.PostCompact` is the backstop for a compaction that reports no count, and
-it takes the new reading **only if it moved down** — a reading that has not caught
-up yet still holds the pre-compaction figure, and writing it back would re-pin
-the stale number.
+`classic.PostCompact` is the backstop for a compaction that reports no count.
+
+The backstop first shipped reading `context.percent` and taking it only if it had
+moved down, on the theory that a reading which had not caught up would still hold
+the pre-compaction figure. It does not: the engine **drops the field**, so right
+after a compaction `usage.context` is `{ window }` and nothing else until the next
+response lands. On 2026-10-19 a session read `/context` at 9% while the band held
+20% from before its compaction — the backstop had asked, been handed no `percent`,
+and kept what it had. One response later the engine reported 10% and the gauge
+caught up on its own, so the hole was exactly the gap between a compaction and
+the next response, which is also exactly when you look at the gauge.
+
+Both hooks now fall back to `$.session.usage({ breakdown: 'summary' })` and take
+`breakdown.percentage`: the fill as `/context` estimates it, computed locally
+with no request sent, and the only figure that exists in that gap. It measures
+against the compaction window rather than the model's, so it may read a point
+above `percent` for the same transcript — the same as `/context` does. The
+moved-down guard stays as the last resort for a breakdown that is not there.
+
+`/sl-debug` now prints `band ct:` — the gauge's own number, which hook wrote it
+and how long ago — next to the engine's raw `context:`, so "the engine stopped
+reporting" and "the band stopped listening" no longer look the same. It prints
+the breakdown's figure too.
 
 The `session.compact` path has no test: the harness has no transcript, so
 `e.messages` is not a list and every hook in the chain is skipped for passing it
-on. The backstop and its guard are tested.
+on. The backstop is tested against the reading's real post-compaction shape: no
+`percent`, a breakdown only when asked, and the guard on a `percent` that is
+present.
 
 ## State
 
-Version 0.1.3, installed from this repo's own marketplace at scope **user**, so
+Version 0.1.4, installed from this repo's own marketplace at scope **user**, so
 it draws in every session on this box. All five commands work. Seventeen tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.

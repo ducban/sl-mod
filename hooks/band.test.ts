@@ -1,4 +1,4 @@
-import type { On, SessionUsage } from 'claude-code'
+import type { On, SessionUsage, SessionUsageArgs } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 // The band has to draw on every surface it claims, and the rotate keys have to
@@ -47,7 +47,7 @@ const SURFACES = ['terminal', 'desktop'] as const
 const stand = (
   on: On,
   now?: number,
-  usage?: SessionUsage | (() => SessionUsage),
+  usage?: SessionUsage | ((args: SessionUsageArgs) => SessionUsage),
   hasVersionFile = true,
   // Every `$.ui.open` the mod makes, in order, for the tabs test. A second
   // `on('ui.open')` in the test body fails the whole module load with
@@ -64,8 +64,8 @@ const stand = (
   mock.store(on, store)
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
-  on('session.usage', () => ({
-    value: (typeof usage === 'function' ? usage() : usage) ?? {
+  on('session.usage', (_, e) => ({
+    value: (typeof usage === 'function' ? usage(e) : usage) ?? {
       startedAt: 0,
       context: { tokens: 660000, window: 1000000, percent: 66 },
       rateLimits: [
@@ -461,11 +461,22 @@ test('a compaction drops the context gauge instead of pinning the old number', a
   // compaction's own result (`tokensAfter`), which is the better source but
   // cannot be raised here: the harness has no transcript, so `e.messages` is not
   // a list and every hook in the chain is skipped for passing it on. What is
-  // tested is the backstop, `classic.PostCompact`, and its guard.
-  let percent = 66
-  const reading = (): SessionUsage => ({
+  // tested is the backstop, `classic.PostCompact`.
+  //
+  // The reading is shaped as the engine shapes it right after a compaction:
+  // `context` is `{ window }` with no `percent` -- the field is dropped, not
+  // held stale -- and the fill exists only in the breakdown, when asked for.
+  // On 2026-10-19 a backstop that read `percent` alone found nothing and left
+  // the band at 20% while /context said 9%.
+  let percent: number | null = 66
+  let estimate: number | null = null
+  const reading = (args: SessionUsageArgs): SessionUsage => ({
     startedAt: 0,
-    context: { tokens: percent * 10_000, window: 1_000_000, percent },
+    context: {
+      window: 1_000_000,
+      ...(percent === null ? {} : { tokens: percent * 10_000, percent }),
+      ...(args?.breakdown && estimate !== null ? { breakdown: { percentage: estimate } } : {}),
+    } as SessionUsage['context'],
     rateLimits: [],
     cost: { usd: 1 },
   })
@@ -476,17 +487,28 @@ test('a compaction drops the context gauge instead of pinning the old number', a
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: /ct .* 66%/ })).toBeDefined()
 
-  percent = 9
+  // The real shape: no `percent`, a breakdown that says 9.
+  percent = null
+  estimate = 9
   await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'summary' })
   expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /66%/ })).toBeUndefined()
 
-  // The guard: a reading that has not caught up yet still holds the
-  // pre-compaction figure, and writing it back would re-pin the stale number.
-  // So only a figure that moved DOWN is taken.
+  // No breakdown either: nothing to take, and nothing to crash on.
+  estimate = null
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'summary' })
+  expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
+
+  // The guard on the plain reading: a `percent` that is present here has not
+  // caught up and is the pre-compaction figure, so only one that moved DOWN is
+  // taken.
   percent = 80
   await $.classic.PostCompact({ trigger: 'auto', compact_summary: 'summary' })
   expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
+
+  percent = 5
+  await $.classic.PostCompact({ trigger: 'auto', compact_summary: 'summary' })
+  expect(await ui.find({ type: 'Text', text: /ct .* 5%/ })).toBeDefined()
 
   await ui.unmount()
 })
