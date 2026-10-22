@@ -38,6 +38,35 @@ percent always come off the same reading. The `reset` key in `/sl-settings`
 turns both off, and while they are on the band ticks once a minute, since
 nothing else redraws it between events.
 
+A shared reading written by a session on an older mod carries no reset, and on
+2026-10-22 a VPS running 0.1.6 and 0.1.4 side by side drew the reset only when
+the newer one had fetched last. A window that did not say now takes its reset
+from the engine's own window of the same period, which always carries one; a
+scoped week has no live twin and stays as it came. Updating every session on
+the box makes the question go away.
+
+## Narrow terminals, and the theme
+
+A line the terminal has no room for is drawn without its bars:
+
+```
+ ct 14%   5h 8% ↻2h08m   7d 8% ↻5d20h   fable 1%
+```
+
+The same figures in half the width. It is decided line by line against the
+`bodyColumns` the surface hands the band, so one crowded line does not strip
+the others, and a line that fits keeps its bars. On a narrow line the `7d` cell
+keeps to its countdown, the shorter of its two faces.
+
+Two palettes: Tokyo Night Moon on a dark theme, which is what the old status
+line used, and Tokyo Night Day on a light one. The band paints its own
+backgrounds, so it was readable on a light theme before — a dark bar on a light
+page — but it looked pasted on. The theme is read from the `/config` row at
+start and again on the `config.set` that changes it, so switching redraws the
+band without a restart. The Moon background steps were a shade too close to the
+terminal's own background — on 2026-10-22 a reader could not make the cells out
+from the row behind them — so each is one notch up the palette now.
+
 The reset sits in the bar's cell but not in its colour. It goes cyan when the
 reset is close (inside a fifth of the window: the last hour of 5h, the last
 day and a bit of 7d), blue midway, and plain further out — and never green,
@@ -111,8 +140,8 @@ present.
 
 ## State
 
-Version 0.1.6, installed from this repo's own marketplace at scope **user**, so
-it draws in every session on this box. All five commands work. Nineteen tests
+Version 0.1.7, installed from this repo's own marketplace at scope **user**, so
+it draws in every session on this box. All five commands work. Twenty-one tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.
 

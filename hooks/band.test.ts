@@ -76,6 +76,8 @@ const stand = (
     },
   }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  // The bottom of the config chain: a set goes through as asked.
+  on('config.set', ($, e) => ({ value: e.value }))
   // refreshVersion walks a chain of files and falls through to a git tag. Only
   // the plugin manifest answers, so the version cell reads the mod's own
   // version -- which is what it does in this repo.
@@ -295,6 +297,56 @@ test('the 5h cell counts down to its reset, and the reset key takes it off', asy
   await band.unmount()
 })
 
+test('a line the terminal has no room for drops its bars, and keeps its figures', async ($, on) => {
+  stand(on, Date.parse('2026-10-06T07:16:00Z'))
+  endpoint(on, { auth: false })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  // Line two in full is some 50 cells; 40 is not enough.
+  const narrow = await $.ui.mount({
+    plugin: 'sl-mod',
+    surface: 'terminal',
+    ...BAND,
+    props: { ...BAND.props, bodyColumns: 40 },
+  })
+  expect(await narrow.find({ type: 'Text', text: /5h 8%/ })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /5h \u{25B0}/u })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: /\u{21BB}2h14m/u })).toBeDefined()
+  // Line one fits in 40 and keeps its shape: the folder cell is still there.
+  expect(await narrow.find({ type: 'Text', text: /sl-mod/ })).toBeDefined()
+  await narrow.unmount()
+
+  const wide = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await wide.find({ type: 'Text', text: /5h \u{25B0}/u })).toBeDefined()
+  await wide.unmount()
+})
+
+test('switching to a light theme redraws the band in the Day palette', async ($, on) => {
+  stand(on)
+  endpoint(on, { auth: false })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  // The harness answers `config.list` itself, with no theme row, so the band
+  // starts on Moon: the first cell of a row takes the darkest step.
+  const first = () => ui.find({ type: 'Text', text: /\u{25B0}/u })
+  expect((await first())?.props.backgroundColor).toBe('#3b4261')
+
+  // Changing the theme the way /config does raises `config.set`, which is
+  // what the mod listens for.
+  const set = await $.config.set({
+    key: 'theme',
+    value: 'light',
+    previous: 'dark',
+    provider: { plugin: '', tier: 'user' },
+    origin: { kind: 'composer' },
+  })
+  expect(set.deny).toBeUndefined()
+  expect((await first())?.props.backgroundColor).toBe('#c4c8da')
+
+  await ui.unmount()
+})
+
 test('a reset that has passed reads now, never a negative number', async ($, on) => {
   stand(on, Date.parse('2026-10-06T09:31:00Z'))
   endpoint(on, { auth: false })
@@ -349,6 +401,11 @@ test('a reading another session fetched inside the poll period is adopted, not f
   // And it is drawn as this session's own would be: the per-model week is there.
   const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: new RegExp(`${SCOPED}.*26%`) })).toBeDefined()
+  // The shared reading is in the old shape, with no reset, so the resets come
+  // from the engine's own windows: 09:30 has passed at 12:00, and the week is
+  // 3d 11h off on an even minute.
+  expect(await ui.find({ type: 'Text', text: /\u{21BB}now/u })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\u{21BB}3d11h/u })).toBeDefined()
 
   await ui.unmount()
 })

@@ -12,20 +12,88 @@ import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 // project version are refreshed on a timer, and the `ui.render` hooks only read
 // what those left behind.
 
-// --- Tokyo Night Moon, the palette the old status line was already using -----
-const BLUE = '#82aaff'
-const PINK = '#fca7ea'
-const GREEN = '#c3e88d'
-const CYAN = '#86e1fc'
-const FG = '#c0caf5'
-const AMBER = '#ffc777'
-const RED = '#ff757f'
-const MUTED = '#414868'
+// --- Two palettes, and the person's theme picks one ---------------------------
+// Tokyo Night Moon for a dark theme -- what the old status line was already
+// using -- and Tokyo Night Day for a light one. The band paints its own
+// backgrounds, so it reads on either; the palette is what keeps it from looking
+// pasted on. `bg` is four background steps, darkest first (lightest first on
+// Day): each cell takes the next one, which is what gives a row its depth.
+//
+// The Moon steps were a shade too close to the terminal's own background: on
+// 2026-10-22 a reader could not make the cells out from the row behind them, so
+// each step is now one notch up the palette, and `muted` is the palette's
+// comment colour rather than its gutter.
+type Palette = {
+  blue: string
+  pink: string
+  green: string
+  cyan: string
+  fg: string
+  amber: string
+  red: string
+  muted: string
+  bg: readonly string[]
+}
+const MOON: Palette = {
+  blue: '#82aaff',
+  pink: '#fca7ea',
+  green: '#c3e88d',
+  cyan: '#86e1fc',
+  fg: '#c0caf5',
+  amber: '#ffc777',
+  red: '#ff757f',
+  muted: '#636da6',
+  bg: ['#3b4261', '#2f334d', '#444a73', '#545c7e'],
+}
+const DAY: Palette = {
+  blue: '#2e7de9',
+  pink: '#9854f1',
+  green: '#587539',
+  cyan: '#007197',
+  fg: '#3760bf',
+  amber: '#8c6c3e',
+  red: '#f52a65',
+  muted: '#848cb5',
+  bg: ['#c4c8da', '#d0d5e3', '#b6bfe2', '#a8aecb'],
+}
 
-// Background steps, darkest first. Each segment takes the next one, which is
-// what gives a row its depth.
-const BG = ['#2f334d', '#1e2030', '#222436', '#414868'] as const
+// Module-level and reassigned, not read through an object, so the drawing code
+// below names a colour the way it always did.
+let BLUE = MOON.blue
+let PINK = MOON.pink
+let GREEN = MOON.green
+let CYAN = MOON.cyan
+let FG = MOON.fg
+let AMBER = MOON.amber
+let RED = MOON.red
+let MUTED = MOON.muted
+let BG = MOON.bg
 const bg = (i: number) => BG[i % BG.length] as string
+
+// The theme row's values are `dark`, `light`, and their `-daltonized` and
+// `-ansi` variants; anything starting `light` takes Day.
+function applyTheme(theme: unknown) {
+  const p = typeof theme === 'string' && theme.startsWith('light') ? DAY : MOON
+  BLUE = p.blue
+  PINK = p.pink
+  GREEN = p.green
+  CYAN = p.cyan
+  FG = p.fg
+  AMBER = p.amber
+  RED = p.red
+  MUTED = p.muted
+  BG = p.bg
+}
+
+// Read once at start and again on the `config.set` that changes it. A failure
+// here keeps Moon, which is the band as it has always been drawn.
+async function refreshTheme($: EngineInterface) {
+  try {
+    applyTheme((await $.config.list()).find(row => row.key === 'theme')?.value)
+  } catch {
+    // Moon stays.
+  }
+}
 
 // --- Glyphs ------------------------------------------------------------------
 // Every one written as a `\u{...}` escape. Written as characters they were lost
@@ -712,7 +780,9 @@ function tickCountdown($: EngineInterface) {
 // quota.
 type Part = { fg: string; text: string; tail?: { fg: string; text: string } }
 const plain = (p: Part) => (p.tail ? `${p.text} ${p.tail.text}` : p.text)
-type Ctx = { folder: string; model: string; windows: Window[]; now: number }
+// `compact` drops the bars: `5h 8%` for `5h ▰▱▱▱▱ 8%`, the same figures in half
+// the width, for a line the surface has no room for.
+type Ctx = { folder: string; model: string; windows: Window[]; now: number; compact?: boolean }
 
 // The two windows you wait out carry their reset after the percent, in the
 // bar's colour. The five-hour one counts down, `↻2h14m`: you will still be here
@@ -731,7 +801,7 @@ const WINDOW_MS: Partial<Record<ItemKey, number>> = {
 }
 const resetColor = (left: number, window: number) =>
   left <= window * 0.2 ? CYAN : left <= window * 0.6 ? BLUE : FG
-const resetFor = (w: Window, now: number): Part['tail'] => {
+const resetFor = (w: Window, now: number, compact = false): Part['tail'] => {
   if (!showReset || typeof w.resetsAt !== 'number') return undefined
   const item = itemForWindow(w)
   const window = WINDOW_MS[item]
@@ -739,8 +809,9 @@ const resetFor = (w: Window, now: number): Part['tail'] => {
   const fg = resetColor(w.resetsAt - now, window)
   if (item === 'five_hour') return { fg, text: `${ICON.reset}${countdown(w.resetsAt, now)}` }
   // Odd minutes show the date. The tick below fires once a minute, so each tick
-  // lands on the other face.
-  const date = Math.floor(now / 60_000) % 2 === 1
+  // lands on the other face. A compact line keeps to the countdown, the shorter
+  // of the two.
+  const date = !compact && Math.floor(now / 60_000) % 2 === 1
 
   return { fg, text: `${ICON.reset}${date ? calendar(w.resetsAt) : countdown(w.resetsAt, now)}` }
 }
@@ -785,7 +856,7 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
     return [
       {
         fg: barColor(contextPercent),
-        text: `ct ${bar(contextPercent)} ${contextPercent}%`,
+        text: ctx.compact ? `ct ${contextPercent}%` : `ct ${bar(contextPercent)} ${contextPercent}%`,
       },
     ]
   }
@@ -822,8 +893,10 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
     .filter(w => itemForWindow(w) === key)
     .map(w => ({
       fg: barColor(w.percentUsed),
-      text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
-      tail: resetFor(w, ctx.now),
+      text: ctx.compact
+        ? `${labelForWindow(w)} ${Math.round(w.percentUsed)}%`
+        : `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+      tail: resetFor(w, ctx.now, ctx.compact),
     }))
 }
 
@@ -831,15 +904,26 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
 // it is switched on -- an empty bar reads as "nothing spent yet", which is the
 // kind of green-because-it-was-attempted reading this repo keeps finding. A line
 // with nothing on it is dropped rather than left as a gap.
-function buildLines(ctx: Ctx): Part[][] {
-  const lines: Part[][] = Array.from({ length: MAX_LINES }, () => [])
-  for (const item of ITEMS) {
-    const n = layout[item.key]
-    if (n < 1 || n > MAX_LINES) continue
-    lines[n - 1]?.push(...partsFor(item.key, ctx))
+//
+// `columns` is what the surface gives the band (`bodyColumns`). A line wider
+// than that is built again without its bars -- `ct 14%  5h 8% ↻2h08m  7d 8% ↻5d20h`
+// -- and a line that fits keeps them. Line by line, so one crowded line does not
+// strip the others. The width counted is the width drawn: a space either side of
+// the text, the tail with its own space, and the separator.
+const cellWidth = (p: Part) => [...p.text].length + 2 + (p.tail ? [...p.tail.text].length + 1 : 0) + 1
+const lineWidth = (line: Part[]) => line.reduce((n, p) => n + cellWidth(p), 0)
+const lineFor = (n: number, ctx: Ctx): Part[] =>
+  ITEMS.filter(item => layout[item.key] === n).flatMap(item => partsFor(item.key, ctx))
+
+function buildLines(ctx: Ctx, columns = Infinity): Part[][] {
+  const lines: Part[][] = []
+  for (let n = 1; n <= MAX_LINES; n += 1) {
+    let line = lineFor(n, ctx)
+    if (lineWidth(line) > columns) line = lineFor(n, { ...ctx, compact: true })
+    if (line.length > 0) lines.push(line)
   }
 
-  return lines.filter(line => line.length > 0)
+  return lines
 }
 
 // For /sl-debug: where a window's reset comes from, or why there is none.
@@ -854,11 +938,25 @@ const resetDebug = (ws: Window[], now: number, item: ItemKey) => {
 // Which reading to draw. The remote one is preferred because it is the only one
 // carrying the per-model week, but only while it is fresh: past the staleness
 // bound the engine's two live windows are used instead.
+//
+// A shared reading may have been written by a session running a mod from before
+// the reset existed, and then it carries none: on 2026-10-22 a VPS session on
+// 0.1.6 drew no reset at all because a 0.1.4 session on the same box had
+// fetched last, and the two took turns as their timers came round. The engine's
+// own windows carry the reset for the same two periods, so a window that did not
+// say takes it from there. Nothing is invented: a scoped week has no live twin
+// and stays as it came.
 function shownWindows(now: number): Window[] {
   const age = reading.at === null ? null : now - reading.at
   const fresh = reading.windows.length > 0 && age !== null && age < STALE_MS
+  if (!fresh) return windows
 
-  return fresh ? reading.windows : windows
+  return reading.windows.map(w => {
+    if (typeof w.resetsAt === 'number' || w.scope) return w
+    const live = windows.find(l => itemForWindow(l) === itemForWindow(w))
+
+    return typeof live?.resetsAt === 'number' ? { ...w, resetsAt: live.resetsAt } : w
+  })
 }
 
 export const register: Register = on => {
@@ -903,6 +1001,7 @@ export const register: Register = on => {
     }
     windows = fromEngine(usage.rateLimits)
     costUsd = usage.cost?.usd ?? null
+    await refreshTheme($)
 
     // Timers FIRST, then the probes. The other way round, a probe that threw
     // left this hook without its timers and without `next(e)`: `session.start`
@@ -945,8 +1044,21 @@ export const register: Register = on => {
     await refreshGit($)
     await refreshVersion($)
     await refreshUsage($)
+    await refreshTheme($)
 
     return next(e)
+  })
+
+  // The person changed theme in /config: redraw in the other palette, once the
+  // change has gone through.
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const done = await next(e)
+    if (done.deny === undefined) {
+      applyTheme(e.value)
+      $.ui.invalidate('ui.render')
+    }
+
+    return done
   })
 
   // Pushed, not polled: this fires when a figure actually moves.
@@ -1136,12 +1248,15 @@ export const register: Register = on => {
     // While Claude works the spinner is what matters, so the row steps back.
     const dim = e.props.isWorking
 
-    const lines = buildLines({
-      folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
-      model,
-      windows: shownWindows(now),
-      now,
-    })
+    const lines = buildLines(
+      {
+        folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
+        model,
+        windows: shownWindows(now),
+        now,
+      },
+      e.props.bodyColumns,
+    )
     if (lines.length === 0) return next(e)
 
     // One powerline row. Each cell takes the next cell's background as its
@@ -1214,7 +1329,7 @@ export const register: Register = on => {
       })
     }
 
-    const lines = buildLines(ctx)
+    const lines = buildLines(ctx, e.props.bodyColumns)
 
     // The five levels spelled out, with the one in force in brackets. `session`
     // is a choice like any other and the first one: it means this mod has no
@@ -1326,6 +1441,8 @@ export const register: Register = on => {
         ),
         line('reset (t)', `${ICON.reset}2h14m after 5h, ${ICON.reset}3d15h or ${ICON.reset}Oct 6 11:00pm after 7d, turn by turn ${ICON.dot} ${showReset ? 'on' : 'off'}`),
         line('reset colour', 'cyan when the reset is close, blue midway, plain further out -- never the gauge colours'),
+        line('narrow', 'a line the terminal has no room for drops its bars: `5h 8%` for `5h ▰▱▱▱▱ 8%`'),
+        line('theme', 'Tokyo Night Moon on a dark theme, Day on a light one; follows /config'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
         line(`${bar(10)}  1-20%`, 'five segments of 20%, rounded UP'),
