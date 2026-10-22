@@ -38,6 +38,12 @@ percent always come off the same reading. The `reset` key in `/sl-settings`
 turns both off, and while they are on the band ticks once a minute, since
 nothing else redraws it between events.
 
+The reset sits in the bar's cell but not in its colour. It goes cyan when the
+reset is close (inside a fifth of the window: the last hour of 5h, the last
+day and a bit of 7d), blue midway, and plain further out — and never green,
+amber or red, which are the quota's. A red countdown next to a green bar would
+read as a quota in trouble.
+
 Line two walks whatever windows come back rather than asking for two by name.
 That matters: the engine hands a mod `five_hour` and `seven_day` and drops the
 per-model week, the `Current week (Fable)` row in `/usage`. It's filtered out of
@@ -105,7 +111,7 @@ present.
 
 ## State
 
-Version 0.1.5, installed from this repo's own marketplace at scope **user**, so
+Version 0.1.6, installed from this repo's own marketplace at scope **user**, so
 it draws in every session on this box. All five commands work. Nineteen tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.

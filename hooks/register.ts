@@ -707,7 +707,11 @@ function tickCountdown($: EngineInterface) {
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
 // is not drawing.
-type Part = { fg: string; text: string }
+// `tail` is a second run of text in the same cell, in its own colour: the reset
+// after a bar, which must not borrow the bar's colour or it reads as part of the
+// quota.
+type Part = { fg: string; text: string; tail?: { fg: string; text: string } }
+const plain = (p: Part) => (p.tail ? `${p.text} ${p.tail.text}` : p.text)
 type Ctx = { folder: string; model: string; windows: Window[]; now: number }
 
 // The two windows you wait out carry their reset after the percent, in the
@@ -716,19 +720,29 @@ type Ctx = { folder: string; model: string; windows: Window[]; now: number }
 // between the countdown, `↻3d15h`, and the date, `↻Oct 6 11:00pm` -- the one
 // you would put in a calendar. Off by the `reset` key in /sl-settings, and
 // absent -- not `↻?` -- when the reading did not say.
-const resetFor = (w: Window, now: number) => {
-  if (!showReset || typeof w.resetsAt !== 'number') return ''
+//
+// Its colour follows how far off the reset is, as a share of the window's own
+// length -- within the hour for 5h, within the day and a bit for 7d -- and it is
+// never green, amber or red: those are the quota's colours, and a red countdown
+// next to a green bar would read as a quota in trouble.
+const WINDOW_MS: Partial<Record<ItemKey, number>> = {
+  five_hour: 5 * 3_600_000,
+  seven_day: 7 * 86_400_000,
+}
+const resetColor = (left: number, window: number) =>
+  left <= window * 0.2 ? CYAN : left <= window * 0.6 ? BLUE : FG
+const resetFor = (w: Window, now: number): Part['tail'] => {
+  if (!showReset || typeof w.resetsAt !== 'number') return undefined
   const item = itemForWindow(w)
-  if (item === 'five_hour') return `${ICON.reset}${countdown(w.resetsAt, now)}`
-  if (item === 'seven_day') {
-    // Odd minutes show the date. The tick below fires once a minute, so each
-    // tick lands on the other face.
-    const date = Math.floor(now / 60_000) % 2 === 1
+  const window = WINDOW_MS[item]
+  if (window === undefined) return undefined
+  const fg = resetColor(w.resetsAt - now, window)
+  if (item === 'five_hour') return { fg, text: `${ICON.reset}${countdown(w.resetsAt, now)}` }
+  // Odd minutes show the date. The tick below fires once a minute, so each tick
+  // lands on the other face.
+  const date = Math.floor(now / 60_000) % 2 === 1
 
-    return `${ICON.reset}${date ? calendar(w.resetsAt) : countdown(w.resetsAt, now)}`
-  }
-
-  return ''
+  return { fg, text: `${ICON.reset}${date ? calendar(w.resetsAt) : countdown(w.resetsAt, now)}` }
 }
 
 function partsFor(key: ItemKey, ctx: Ctx): Part[] {
@@ -806,14 +820,11 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
   // Everything left is a rate-limit window, and there may be several of a kind.
   return ctx.windows
     .filter(w => itemForWindow(w) === key)
-    .map(w => {
-      const left = resetFor(w, ctx.now)
-
-      return {
-        fg: barColor(w.percentUsed),
-        text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%${left ? ` ${left}` : ''}`,
-      }
-    })
+    .map(w => ({
+      fg: barColor(w.percentUsed),
+      text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
+      tail: resetFor(w, ctx.now),
+    }))
 }
 
 // The band, line by line. An item whose data is missing draws nothing even when
@@ -1147,8 +1158,13 @@ export const register: Register = on => {
         const here = bg(i)
         const after = i === parts.length - 1 ? undefined : bg(i + 1)
 
+        // The tail is its own Text so it can take its own colour, on the same
+        // background so the cell stays one cell.
         return [
-          Text({ backgroundColor: here, color: part.fg, dimColor: dim, children: [` ${part.text} `] }),
+          Text({ backgroundColor: here, color: part.fg, dimColor: dim, children: [` ${part.text}${part.tail ? '' : ' '}`] }),
+          ...(part.tail
+            ? [Text({ backgroundColor: here, color: part.tail.fg, dimColor: dim, children: [` ${part.tail.text} `] })]
+            : []),
           Text({ backgroundColor: after, color: here, dimColor: dim, children: [ICON.sep] }),
         ]
       })
@@ -1176,7 +1192,7 @@ export const register: Register = on => {
     const itemRow = (item: (typeof ITEMS)[number]) => {
       const n = layout[item.key]
       const parts = partsFor(item.key, ctx)
-      const preview = parts.length > 0 ? parts.map(p => p.text).join('  ') : '(nothing to show yet)'
+      const preview = parts.length > 0 ? parts.map(plain).join('  ') : '(nothing to show yet)'
 
       return Box({
         flexDirection: 'row',
@@ -1262,7 +1278,7 @@ export const register: Register = on => {
         ...(lines.length === 0
           ? [Text({ color: MUTED, children: ['nothing switched on'] })]
           : lines.map((line, i) =>
-              Text({ color: FG, wrap: 'truncate-end', children: [`${i + 1}  ${line.map(p => p.text).join('  ')}`] }),
+              Text({ color: FG, wrap: 'truncate-end', children: [`${i + 1}  ${line.map(plain).join('  ')}`] }),
             )),
         Text({ children: [' '] }),
         Box({
@@ -1309,6 +1325,7 @@ export const register: Register = on => {
           line(`${item.name} (${item.hotkey})`, `${item.about} ${ICON.dot} ${layout[item.key] > 0 ? `line ${layout[item.key]}` : 'off'}`),
         ),
         line('reset (t)', `${ICON.reset}2h14m after 5h, ${ICON.reset}3d15h or ${ICON.reset}Oct 6 11:00pm after 7d, turn by turn ${ICON.dot} ${showReset ? 'on' : 'off'}`),
+        line('reset colour', 'cyan when the reset is close, blue midway, plain further out -- never the gauge colours'),
         gap,
         Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
         line(`${bar(10)}  1-20%`, 'five segments of 20%, rounded UP'),
