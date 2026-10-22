@@ -70,7 +70,7 @@ const stand = (
       context: { tokens: 660000, window: 1000000, percent: 66 },
       rateLimits: [
         { kind: 'five_hour', percentUsed: 8, resetsAt: '2026-10-06T09:30:00.000Z' },
-        { kind: 'seven_day', percentUsed: 36, resetsAt: '2026-10-06T23:00:00.000Z' },
+        { kind: 'seven_day', percentUsed: 36, resetsAt: '2026-10-09T23:00:00.000Z' },
       ],
       cost: { usd: 1 },
     },
@@ -206,7 +206,7 @@ const SCOPED = 'fable'
 const reply = () =>
   JSON.stringify({
     limits: [
-      { kind: 'session', group: 'session', percent: 9, scope: null },
+      { kind: 'session', group: 'session', percent: 9, scope: null, resets_at: '2026-10-06T13:45:00.000Z' },
       { kind: 'weekly_all', group: 'weekly', percent: 39, scope: null },
       {
         kind: 'weekly_scoped',
@@ -265,6 +265,44 @@ test('a fresh reading adds the per-model week', async ($, on) => {
   // The endpoint's own figure wins over the engine's for the week, so the row
   // comes from one reading rather than two that disagree.
   expect(await ui.find({ type: 'Text', text: /39%/ })).toBeDefined()
+  // And the reset with it: 12:00 against the endpoint's 13:45, not the engine's
+  // 09:30, so the countdown and the percent come from the same reading.
+  expect(await ui.find({ type: 'Text', text: /9% \u{21BB}1h45m/u })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the 5h cell counts down to its reset, and the reset key takes it off', async ($, on) => {
+  // 07:16 against a window that resets at 09:30: two hours and fourteen minutes.
+  stand(on, Date.parse('2026-10-06T07:16:00Z'))
+  endpoint(on, { auth: false })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const band = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /5h .* 8% \u{21BB}2h14m/u })).toBeDefined()
+  // 07:16 is an even minute, so the week shows its countdown: 3d 15h 44m to
+  // the 9th at 23:00, in days and hours.
+  expect(await band.find({ type: 'Text', text: /7d .* 36% \u{21BB}3d15h/u })).toBeDefined()
+
+  const pane = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...SETTINGS })
+  await pane.press({ key: 'item-reset' })
+  expect(await band.find({ type: 'Text', text: /\u{21BB}/u })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /5h .* 8%/ })).toBeDefined()
+
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('a reset that has passed reads now, never a negative number', async ($, on) => {
+  stand(on, Date.parse('2026-10-06T09:31:00Z'))
+  endpoint(on, { auth: false })
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /8% \u{21BB}now/u })).toBeDefined()
+  // 09:31 is an odd minute, so the week shows the date instead. Spelled in
+  // the machine's own zone, so only the shape is checked.
+  expect(await ui.find({ type: 'Text', text: /7d .* 36% \u{21BB}Oct \d{1,2} \d{1,2}:\d\d[ap]m/u })).toBeDefined()
 
   await ui.unmount()
 })

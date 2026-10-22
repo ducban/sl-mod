@@ -18,7 +18,7 @@ it. The two lines move; they do not stay where `statusLine` put them.
 
 ```
   arch     Opus 5 ▮▮▯▯▯ (M)    main ✓   ⌂ 0.1.2
- ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9%   7d ▰▰▱▱▱ 39%   fable ▰▰▱▱▱ 26%
+ ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9% ↻2h14m   7d ▰▰▱▱▱ 39% ↻3d15h   fable ▰▰▱▱▱ 26%
 ```
 
 Up to four lines, and what sits on which is set in `/sl-settings`. The default
@@ -26,6 +26,17 @@ is identity on line one and budget on line two. Nothing is drawn under the
 prompt: the engine keeps its own hint line.
 Each bar is five segments of 20%, rounded **up**, so 19% shows one segment
 rather than none — a quota must never read lower than it is.
+
+The `5h` bar carries `↻2h14m`: how long until the window resets, minutes rounded
+up, and `↻now` once the moment has passed and the engine has not sent the next
+reset yet — it comes with the next reading, not at the stroke of the hour. The
+`7d` bar turns over once a minute between its countdown, `↻3d15h`, and the date
+it lands on, `↻Oct 6 11:00pm` in the terminal's own zone: the week is days off,
+and the date is the one you would put in a calendar. Both readings carry the
+reset (`resetsAt` from the engine, `resets_at` from the endpoint), so it and the
+percent always come off the same reading. The `reset` key in `/sl-settings`
+turns both off, and while they are on the band ticks once a minute, since
+nothing else redraws it between events.
 
 Line two walks whatever windows come back rather than asking for two by name.
 That matters: the engine hands a mod `five_hour` and `seven_day` and drops the
@@ -94,8 +105,8 @@ present.
 
 ## State
 
-Version 0.1.4, installed from this repo's own marketplace at scope **user**, so
-it draws in every session on this box. All five commands work. Seventeen tests
+Version 0.1.5, installed from this repo's own marketplace at scope **user**, so
+it draws in every session on this box. All five commands work. Nineteen tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.
 
@@ -164,8 +175,9 @@ sends is not.
 ## What goes where
 
 `/sl-settings` draws one row per item. Its key moves that item on: line 1, 2, 3,
-4, off, and round again. One key per item and no cursor to lose. The effort
-control sits at the bottom of the same pane.
+4, off, and round again. One key per item and no cursor to lose. Under the
+items sits `reset (t)`, an on/off for the resets after the `5h` and `7d` bars,
+and the effort control sits at the bottom of the same pane.
 
 The layout is stored in `$.store`, so it is per machine and outlives the
 session.
@@ -292,7 +304,7 @@ down, and it was read past every time.
 | | |
 |---|---|
 | `/sl` | hide or show the band |
-| `/sl-settings` | what shows, on which line, and the effort choice |
+| `/sl-settings` | what shows, on which line, the resets, and the effort choice |
 | `/sl-help` | the legend: every item, how to read a gauge, the keys |
 | `/sl-effort <level>` | set it outright, or `off` to stop overriding |
 | `/sl-debug` | print what the engine reports, notes included |

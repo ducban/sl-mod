@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 // A status line in the band above the prompt.
 //
@@ -38,7 +38,7 @@ const bg = (i: number) => BG[i % BG.length] as string
 // metrics -- which is why some of these sit a shade smaller than the row.
 //
 //   in JetBrains Mono    E0B0 2302 2713 25CF 21E1 25B2 25BC 00B7 25A0 25A1 2588 2591 2593
-//   from a fallback      F07B F1B2 E725 (Nerd Font) and 25B0 25B1 25AE 25AF
+//   from a fallback      F07B F1B2 E725 (Nerd Font) and 25B0 25B1 25AE 25AF 21BB
 const ICON = {
   folder: '\u{F07B}', // nf-fa-folder
   model: '\u{F1B2}', // nf-fa-cube
@@ -49,6 +49,7 @@ const ICON = {
   clean: '\u{2713}', // nothing to commit
   sep: '\u{E0B0}', // the powerline separator between two cells
   dot: '\u{00B7}',
+  reset: '\u{21BB}', // before the countdown to a window's reset
   up: '\u{25B2}',
   down: '\u{25BC}',
 }
@@ -175,7 +176,8 @@ let layout: Layout = { ...DEFAULT_LAYOUT }
 // of that sort. The engine says `five_hour` and `seven_day`; the usage endpoint
 // says `session`, `weekly_all` and `weekly_scoped`. A window carrying a scope is
 // labelled with the model it is scoped to.
-type Window = { kind: string; percentUsed: number; scope?: string | null }
+// `resetsAt` is epoch milliseconds, or null when the reading did not say.
+type Window = { kind: string; percentUsed: number; scope?: string | null; resetsAt?: number | null }
 const itemForWindow = (w: Window): ItemKey => {
   if (w.scope) return 'scoped'
   if (w.kind === 'five_hour' || w.kind === 'session') return 'five_hour'
@@ -192,6 +194,50 @@ const labelForWindow = (w: Window) => {
   if (item === 'spend') return 'spend'
 
   return w.kind
+}
+
+// The engine spells a reset as an ISO 8601 string and the usage endpoint as
+// `resets_at`, RFC 3339 as well. The status line payload this mod replaced
+// carried epoch seconds, so a number is taken too. Anything else is "did not
+// say", and a window that did not say draws no countdown.
+const parseReset = (v: unknown): number | null => {
+  if (typeof v === 'number' && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v
+  if (typeof v === 'string') {
+    const ms = Date.parse(v)
+
+    return Number.isFinite(ms) ? ms : null
+  }
+
+  return null
+}
+
+const fromEngine = (ws: SessionRateLimit[]): Window[] =>
+  ws.map(w => ({ kind: w.kind, percentUsed: w.percentUsed, resetsAt: parseReset(w.resetsAt) }))
+
+// Time left as `3d15h`, `2h14m`, `48m`, or `now` once the moment has passed:
+// the engine sends the next reset with the next reading, not at the stroke of
+// the hour, and a negative number would be inventing a window nobody has
+// reported. Minutes round UP for the same reason the bars do.
+const countdown = (resetsAt: number, now: number) => {
+  const minutes = Math.ceil((resetsAt - now) / 60_000)
+  if (minutes <= 0) return 'now'
+  const d = Math.floor(minutes / 1440)
+  const h = Math.floor((minutes % 1440) / 60)
+  const m = minutes % 60
+  if (d > 0) return `${d}d${String(h).padStart(2, '0')}h`
+
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
+}
+
+// `Oct 6 11:00pm`, in the terminal's own time zone. Local getters rather than
+// toLocaleString, whose spelling depends on which ICU data the runtime shipped.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const calendar = (at: number) => {
+  const d = new Date(at)
+  const h = d.getHours()
+  const hour = h % 12 === 0 ? 12 : h % 12
+
+  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${hour}:${String(d.getMinutes()).padStart(2, '0')}${h < 12 ? 'am' : 'pm'}`
 }
 
 // --- What the drawing reads --------------------------------------------------
@@ -214,6 +260,9 @@ let branch: string | null = null
 let isDirty = false
 let isAhead = false
 let isHidden = false
+// The countdown after the 5h bar. A preference like the layout, so it is stored
+// and shared by every session on the machine.
+let showReset = true
 let projectVersion: string | null = null
 // Why each polled figure has nothing, in words. An empty cell looks identical
 // whether the probe answered "no branch" or threw on its way to asking, and
@@ -428,7 +477,14 @@ async function refreshUsage($: EngineInterface) {
     const percent = typeof one.percent === 'number' ? one.percent : null
     if (kind === null || percent === null) return []
 
-    return [{ kind, percentUsed: percent, scope: one.scope?.model?.display_name ?? null }]
+    return [
+      {
+        kind,
+        percentUsed: percent,
+        scope: one.scope?.model?.display_name ?? null,
+        resetsAt: parseReset(one.resets_at),
+      },
+    ]
   })
 
   // An empty array means the account has no window to report. Drawing zeroes
@@ -632,12 +688,48 @@ async function resetLayout($: EngineInterface) {
   $.ui.invalidate('ui.render')
 }
 
+async function toggleReset($: EngineInterface) {
+  showReset = !showReset
+  await $.store.set('showReset', showReset)
+  $.ui.invalidate('ui.render')
+}
+
+// The countdown is the one cell that moves while nothing else does: every other
+// figure is pushed or polled, and the band redraws when one lands. So it gets a
+// tick of its own, one a minute, which is the countdown's own resolution and
+// what turns the week's cell over. A redraw is a function call; while the
+// countdown is off there is nothing to move.
+function tickCountdown($: EngineInterface) {
+  if (showReset) $.ui.invalidate('ui.render')
+}
+
 // --- Turning state into cells ------------------------------------------------
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
 // is not drawing.
 type Part = { fg: string; text: string }
-type Ctx = { folder: string; model: string; windows: Window[] }
+type Ctx = { folder: string; model: string; windows: Window[]; now: number }
+
+// The two windows you wait out carry their reset after the percent, in the
+// bar's colour. The five-hour one counts down, `↻2h14m`: you will still be here
+// when it comes round. The week is days off, so its cell turns over each minute
+// between the countdown, `↻3d15h`, and the date, `↻Oct 6 11:00pm` -- the one
+// you would put in a calendar. Off by the `reset` key in /sl-settings, and
+// absent -- not `↻?` -- when the reading did not say.
+const resetFor = (w: Window, now: number) => {
+  if (!showReset || typeof w.resetsAt !== 'number') return ''
+  const item = itemForWindow(w)
+  if (item === 'five_hour') return `${ICON.reset}${countdown(w.resetsAt, now)}`
+  if (item === 'seven_day') {
+    // Odd minutes show the date. The tick below fires once a minute, so each
+    // tick lands on the other face.
+    const date = Math.floor(now / 60_000) % 2 === 1
+
+    return `${ICON.reset}${date ? calendar(w.resetsAt) : countdown(w.resetsAt, now)}`
+  }
+
+  return ''
+}
 
 function partsFor(key: ItemKey, ctx: Ctx): Part[] {
   if (key === 'dir') return [{ fg: BLUE, text: `${ICON.folder}  ${ctx.folder}` }]
@@ -714,10 +806,14 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
   // Everything left is a rate-limit window, and there may be several of a kind.
   return ctx.windows
     .filter(w => itemForWindow(w) === key)
-    .map(w => ({
-      fg: barColor(w.percentUsed),
-      text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%`,
-    }))
+    .map(w => {
+      const left = resetFor(w, ctx.now)
+
+      return {
+        fg: barColor(w.percentUsed),
+        text: `${labelForWindow(w)} ${bar(w.percentUsed)} ${Math.round(w.percentUsed)}%${left ? ` ${left}` : ''}`,
+      }
+    })
 }
 
 // The band, line by line. An item whose data is missing draws nothing even when
@@ -733,6 +829,15 @@ function buildLines(ctx: Ctx): Part[][] {
   }
 
   return lines.filter(line => line.length > 0)
+}
+
+// For /sl-debug: where a window's reset comes from, or why there is none.
+const resetDebug = (ws: Window[], now: number, item: ItemKey) => {
+  const w = ws.find(one => itemForWindow(one) === item)
+  if (!w) return 'no such window in the shown reading'
+  if (typeof w.resetsAt !== 'number') return 'the shown reading did not say'
+
+  return `${new Date(w.resetsAt).toISOString()} (${countdown(w.resetsAt, now)}, ${calendar(w.resetsAt)}) ${showReset ? 'drawn' : 'off by the reset key'}`
 }
 
 // Which reading to draw. The remote one is preferred because it is the only one
@@ -762,6 +867,7 @@ export const register: Register = on => {
     // what is wanted: the band is either the shape you want above your prompt
     // or it is not.
     isHidden = (await $.store.get('isHidden')) === true
+    showReset = (await $.store.get('showReset')) !== false
     const saved = await $.store.get('layout')
     if (saved && typeof saved === 'object') {
       // Merged over the defaults, never used as-is: a layout stored before an
@@ -784,7 +890,7 @@ export const register: Register = on => {
     if (typeof usage.context.percent === 'number') {
       await setContext($, usage.context.percent, 'session.start')
     }
-    windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    windows = fromEngine(usage.rateLimits)
     costUsd = usage.cost?.usd ?? null
 
     // Timers FIRST, then the probes. The other way round, a probe that threw
@@ -797,6 +903,7 @@ export const register: Register = on => {
     // it changes when someone edits package.json.
     $.clock.every(5000, () => void refreshGit($))
     $.clock.every(60_000, () => void refreshVersion($))
+    $.clock.every(60_000, () => tickCountdown($))
     // Off the draw path, always: a network call must never sit between a
     // keystroke and a frame.
     $.clock.every(POLL_MS, () => void refreshUsage($))
@@ -818,7 +925,7 @@ export const register: Register = on => {
     if (typeof usage.context.percent === 'number') {
       await setContext($, usage.context.percent, 'classic.SessionStart')
     }
-    windows = usage.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    windows = fromEngine(usage.rateLimits)
     costUsd = usage.cost?.usd ?? null
     // Awaited here, not fired and forgotten: this is the only event a test can
     // raise, so the probes have to have finished before the test looks. Each one
@@ -837,7 +944,7 @@ export const register: Register = on => {
       await setContext($, e.context.percent, 'session.measure')
     }
     contextWindow = e.context.window ?? contextWindow
-    windows = e.rateLimits.map(w => ({ kind: w.kind, percentUsed: w.percentUsed }))
+    windows = fromEngine(e.rateLimits)
     costUsd = e.cost?.usd ?? costUsd
     // `cost` in `changed` is the engine saying a priced response landed, which
     // is exactly once per response: the dedup signal the token counts need.
@@ -985,6 +1092,8 @@ export const register: Register = on => {
       text: [
         `rateLimits: ${usage.rateLimits.length} entry(s)`,
         ...usage.rateLimits.map((w, i) => `  [${i}] ${JSON.stringify(w)}`),
+        `  5h resets: ${resetDebug(shownWindows(now), now, 'five_hour')}`,
+        `  7d resets: ${resetDebug(shownWindows(now), now, 'seven_day')}`,
         `context: ${JSON.stringify(usage.context)}`,
         `  band ct: ${contextPercent === null ? 'none' : `${contextPercent}%`} window=${contextWindow ?? 'none'} from=${contextSource}${age}`,
         `  breakdown (what /context shows): ${estimate === null ? 'none' : `${estimate}%`}`,
@@ -1020,6 +1129,7 @@ export const register: Register = on => {
       folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
       model,
       windows: shownWindows(now),
+      now,
     })
     if (lines.length === 0) return next(e)
 
@@ -1060,6 +1170,7 @@ export const register: Register = on => {
       folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
       model,
       windows: shownWindows(now),
+      now,
     }
 
     const itemRow = (item: (typeof ITEMS)[number]) => {
@@ -1104,6 +1215,25 @@ export const register: Register = on => {
         Text({ color: MUTED, wrap: 'wrap', children: ['A key moves its item on: 1, 2, 3, 4, off.'] }),
         Text({ children: [' '] }),
         ...ITEMS.map(itemRow),
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Button({
+              key: 'item-reset',
+              label: 'reset'.padEnd(9),
+              hotkey: 't',
+              plain: true,
+              onPress: () => void toggleReset($),
+            }),
+            Text({ color: showReset ? BLUE : MUTED, children: [showReset ? 'on    ' : 'off   '] }),
+            Text({
+              color: MUTED,
+              wrap: 'truncate-end',
+              children: [`${ICON.reset} after 5h and 7d: until the window resets; the week turns between countdown and date`],
+            }),
+          ],
+        }),
         Text({ children: [' '] }),
         Text({ color: BLUE, bold: true, children: ['Effort'] }),
         Box({
@@ -1178,6 +1308,7 @@ export const register: Register = on => {
         ...ITEMS.map(item =>
           line(`${item.name} (${item.hotkey})`, `${item.about} ${ICON.dot} ${layout[item.key] > 0 ? `line ${layout[item.key]}` : 'off'}`),
         ),
+        line('reset (t)', `${ICON.reset}2h14m after 5h, ${ICON.reset}3d15h or ${ICON.reset}Oct 6 11:00pm after 7d, turn by turn ${ICON.dot} ${showReset ? 'on' : 'off'}`),
         gap,
         Text({ color: BLUE, bold: true, children: ['Reading a gauge'] }),
         line(`${bar(10)}  1-20%`, 'five segments of 20%, rounded UP'),
