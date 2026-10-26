@@ -771,6 +771,41 @@ function tickCountdown($: EngineInterface) {
   if (showReset) $.ui.invalidate('ui.render')
 }
 
+// --- A compaction nothing told the band about --------------------------------
+// Three hooks hear a compaction: `session.compact`, `classic.PostCompact`, and
+// `session.measure` one response later. On a machine with managed settings, or
+// a Team or Enterprise account, Claude Code 2.1.310 seats its bundled
+// `cc-plugin-sec-default@builtin` outermost, and that module passes neither
+// compaction event on: the engine logs `sl-mod: its session.compact hook was
+// skipped. "cc-plugin-sec-default" runs first and sent the event on past it`,
+// and the same for `classic.PostCompact`. vibe-island-on-arch, 2026-10-26:
+// /compact took the transcript from 202k tokens to 15k and the band held 20%
+// while /context said 6%. Neither hook of this mod's ever ran.
+//
+// A timer is the mod's own, and nothing seats itself in front of it. So the
+// gauge checks its own premise every few seconds. The engine drops
+// `context.percent` the moment a compaction lands and does not put it back
+// until the next response, so a gauge that holds a number while the reading
+// has none is exactly a gauge that missed a compaction -- and it takes the
+// breakdown, as the hooks would have. The rest of the time the reading has a
+// percent and the tick does nothing: one local call, no estimate, no redraw.
+const RESYNC_MS = 10_000
+async function resyncContext($: EngineInterface) {
+  if (contextPercent === null) return
+  try {
+    const usage = await $.session.usage()
+    if (typeof usage.context.percent === 'number') return
+
+    const estimate = await breakdownPercent($)
+    if (estimate === null || estimate === contextPercent) return
+    await setContext($, estimate, 'tick breakdown')
+    $.ui.invalidate('ui.render')
+  } catch {
+    // The reading is the engine's own and does not fail; if it ever does, the
+    // gauge keeps what it has, which is what it did before this tick existed.
+  }
+}
+
 // --- Turning state into cells ------------------------------------------------
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
@@ -1014,6 +1049,8 @@ export const register: Register = on => {
     $.clock.every(5000, () => void refreshGit($))
     $.clock.every(60_000, () => void refreshVersion($))
     $.clock.every(60_000, () => tickCountdown($))
+    // The gauge's check on itself, for a compaction no hook was allowed to hear.
+    $.clock.every(RESYNC_MS, () => void resyncContext($))
     // Off the draw path, always: a network call must never sit between a
     // keystroke and a frame.
     $.clock.every(POLL_MS, () => void refreshUsage($))
@@ -1085,6 +1122,8 @@ export const register: Register = on => {
   // takes the figure from the event rather than asking again. Asking again does
   // not help on its own: `context.tokens` is "input tokens the LAST RESPONSE was
   // answered over", and right after a compaction there has not been one yet.
+  // Neither this hook nor the backstop below runs when a module seated outside
+  // this one keeps the event; see resyncContext for the case that happened.
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
     if (done.skip !== undefined) return done

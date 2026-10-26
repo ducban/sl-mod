@@ -60,7 +60,7 @@ const stand = (
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
   // load with `on("clock.now") registered twice`.
-  mock.clock(on, now === undefined ? undefined : { now })
+  const clock = mock.clock(on, now === undefined ? undefined : { now })
   mock.store(on, store)
   on('session.cwd', () => ({ value: '/home/bannd/Workspace/Projects/personal_works/sl-mod' }))
   on('session.model', () => ({ value: 'claude-opus-5' }))
@@ -126,6 +126,9 @@ const stand = (
   // `ui.invalidate` is deliberately NOT stubbed. Answering it from here swallows
   // the redraw, so a Button's press changes state and the test still reads the
   // tree from before it. The harness answers it properly; let it.
+
+  // The clock, for the tests that need its timers to fire.
+  return clock
 }
 
 test('the band draws on every surface, not just the terminal', async ($, on) => {
@@ -545,6 +548,86 @@ test('a repo with no version does not take the git cell down with it', async ($,
 
   expect(await ui.find({ type: 'Text', text: /main/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /0\.1\.0/ })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('a compaction no hook was allowed to hear is caught by the clock', async ($, on) => {
+  // On a Team or Enterprise account Claude Code 2.1.310 seats its bundled
+  // `cc-plugin-sec-default@builtin` outermost, and that module passes neither
+  // `session.compact` nor `classic.PostCompact` on: the engine logs `sl-mod: its
+  // session.compact hook was skipped` and neither hook below runs.
+  // vibe-island-on-arch, 2026-10-26: /compact took the transcript from 202k
+  // tokens to 15k and the band held 20% while /context said 6%.
+  //
+  // A timer is the mod's own. Every RESYNC_MS the gauge checks its premise: the
+  // engine drops `context.percent` the moment a compaction lands and does not
+  // put it back until the next response, so a gauge holding a number while the
+  // reading has none has missed a compaction, and takes the breakdown.
+  let percent: number | null = 20
+  let estimate: number | null = null
+  const reading = (args: SessionUsageArgs): SessionUsage => ({
+    startedAt: 0,
+    context: {
+      window: 1_000_000,
+      ...(percent === null ? {} : { tokens: percent * 10_000, percent }),
+      ...(args?.breakdown && estimate !== null ? { breakdown: { percentage: estimate } } : {}),
+    } as SessionUsage['context'],
+    rateLimits: [],
+    cost: { usd: 1 },
+  })
+  // A fresh shared reading in the store, so the usage poll the timers start
+  // never reaches the network.
+  const clock = stand(on, undefined, reading, true, undefined, {
+    usage: { windows: [{ kind: 'five_hour', percentUsed: 8 }], fetchedAt: 0, nextAllowedAt: 0 },
+  })
+
+  // `session.start` is where the timers are set, so it is what is raised here.
+  // The bottom of its chain echoes the cwd, as core does.
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /ct .* 20%/ })).toBeDefined()
+
+  // Steady state: the reading carries a percent, so the tick leaves the gauge
+  // alone -- and never asks for the breakdown.
+  estimate = 3
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: /ct .* 20%/ })).toBeDefined()
+
+  // The compaction lands and nothing tells the band: the percent is gone, the
+  // breakdown says 6. The next tick takes it.
+  percent = null
+  estimate = 6
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: /ct .* 6%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /20%/ })).toBeUndefined()
+
+  // The breakdown moves on as the gap goes on, and the tick follows it.
+  estimate = 7
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: /ct .* 7%/ })).toBeDefined()
+
+  // The next response lands: the percent is back, and from here the pushed
+  // figure is the gauge's source again. The engine redraws the band on a
+  // measurement itself; here the harness does not, so the minute's countdown
+  // tick is what redraws it -- and the six resync ticks on the way there see a
+  // percent and stand down, breakdown or no breakdown.
+  percent = 9
+  estimate = 2
+  await $.session.measure({
+    context: { tokens: 90_000, window: 1_000_000, percent: 9 },
+    rateLimits: [],
+    cost: { usd: 1 },
+    changed: ['context'],
+  })
+  await clock.advance(60_000)
+  expect(await ui.find({ type: 'Text', text: /ct .* 9%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /ct .* 2%/ })).toBeUndefined()
 
   await ui.unmount()
 })

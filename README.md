@@ -132,16 +132,39 @@ and how long ago — next to the engine's raw `context:`, so "the engine stopped
 reporting" and "the band stopped listening" no longer look the same. It prints
 the breakdown's figure too.
 
+Then on 2026-10-26 neither hook ran at all. On a machine with managed settings,
+or a Team or Enterprise account, Claude Code 2.1.310 seats its bundled
+`cc-plugin-sec-default@builtin` outermost, and that module does not pass
+`session.compact` or `classic.PostCompact` on: the engine logs *"sl-mod: its
+session.compact hook was skipped. \"cc-plugin-sec-default\" runs first and sent
+the event on past it"* and the band never hears. A `/compact` took one session
+from 202k tokens to 15k and the gauge held 20% while `/context` said 6%. (The
+same module keeps `classic.SessionStart` and `classic.PostToolUse`, which is the
+notice that opens every session on such a machine; those two are harmless here,
+because `session.start` takes the first readings.)
+
+So the gauge now checks its own premise, on a timer, which is the mod's own and
+has nothing seated in front of it. Every ten seconds it reads the plain usage —
+one local call. The engine drops `context.percent` the moment a compaction lands
+and does not put it back until the next response, so a gauge holding a number
+while the reading has none has missed a compaction, and it takes the breakdown
+as the hooks would have. The rest of the time the tick does nothing: no
+estimate, no redraw. `/sl-debug` shows a gauge written this way as
+`from=tick breakdown`. The fix that belongs to Claude Code is for the bundled
+module to call `next(e)`; this one just stops depending on it.
+
 The `session.compact` path has no test: the harness has no transcript, so
 `e.messages` is not a list and every hook in the chain is skipped for passing it
 on. The backstop is tested against the reading's real post-compaction shape: no
 `percent`, a breakdown only when asked, and the guard on a `percent` that is
-present.
+present. The timer is tested on its own: a reading that loses its `percent`
+while the gauge holds one, the tick taking the breakdown, following it while the
+gap lasts, and standing down once a pushed figure returns.
 
 ## State
 
-Version 0.1.7, installed from this repo's own marketplace at scope **user**, so
-it draws in every session on this box. All five commands work. Twenty-one tests
+Version 0.1.8, installed from this repo's own marketplace at scope **user**, so
+it draws in every session on this box. All five commands work. Twenty-two tests
 pass under `claude plugin test`, `tsc -p .` is clean and `claude plugin validate`
 passes.
 
