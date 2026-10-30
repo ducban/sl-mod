@@ -14,6 +14,10 @@ expensive reads move onto a timer instead of sitting on the draw path.
 The trade: there is no render site under the prompt, so the band sits **above**
 it. The two lines move; they do not stay where `statusLine` put them.
 
+What it keeps from `claude-powerline`, and every idea taken from another mod
+since, is listed in `ACKNOWLEDGEMENTS.md`, one line each with the person and
+the licence.
+
 ## What it shows
 
 ```
@@ -153,13 +157,27 @@ estimate, no redraw. `/sl-debug` shows a gauge written this way as
 `from=tick breakdown`. The fix that belongs to Claude Code is for the bundled
 module to call `next(e)`; this one just stops depending on it.
 
+The tick can still be ten seconds late, and the request you send right after a
+compaction is when you look at the gauge. So `turn.step`, the one event every
+mod is handed, is read for it too: each main-loop request says how many
+messages it carries (`messageCount`), and a request carrying fewer than half of
+what the last one did is the first after a compaction — the transcript was
+rewritten under it. The gauge then takes the breakdown the same way, on the
+request itself rather than on the next tick; `/sl-debug` shows it as
+`from=turn.step breakdown`. A subagent's loop carries its own small count and is
+skipped, and a `/clear` halves it too, which lands on an emptied window and is
+right. The halving test is Karan Bansal's, from
+[cache-tax](https://github.com/karanb192/cache-tax); see `ACKNOWLEDGEMENTS.md`.
+
 The `session.compact` path has no test: the harness has no transcript, so
 `e.messages` is not a list and every hook in the chain is skipped for passing it
 on. The backstop is tested against the reading's real post-compaction shape: no
 `percent`, a breakdown only when asked, and the guard on a `percent` that is
 present. The timer is tested on its own: a reading that loses its `percent`
 while the gauge holds one, the tick taking the breakdown, following it while the
-gap lasts, and standing down once a pushed figure returns.
+gap lasts, and standing down once a pushed figure returns. The `turn.step` test
+drives the stream from a stand-in bottom: a count that grows, a subagent's small
+one, then the main loop's falling to a third and the gauge taking the breakdown.
 
 ## State
 

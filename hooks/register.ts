@@ -322,6 +322,13 @@ let contextWindow: number | null = null
 // tell the two apart.
 let contextSource = 'none'
 let contextAt: number | null = null
+// How many messages the main loop's last request carried. A request carrying
+// fewer than half of them is the first one after a compaction (or a /clear):
+// the transcript was rewritten under it. That makes `turn.step` a compaction
+// signal of the mod's own, one nothing seats itself in front of, and one that
+// fires on the first request after the compaction rather than on a tick.
+// The halving test is Karan Bansal's, from cache-tax (see ACKNOWLEDGEMENTS.md).
+let mainMessages = 0
 let windows: Window[] = []
 let effort: string | undefined
 let branch: string | null = null
@@ -806,6 +813,30 @@ async function resyncContext($: EngineInterface) {
   }
 }
 
+// What the gauge does once something says a compaction has happened but not
+// what it came down to. The breakdown is the live estimate and is taken as it
+// comes. Failing that, the plain reading is taken only if it moved DOWN: it is
+// the last response's figure, and the only way it is present here is if it has
+// not caught up yet, in which case it is the pre-compaction one and writing it
+// back would re-pin the stale number. `source` names the caller for /sl-debug.
+async function afterCompaction($: EngineInterface, source: string) {
+  const estimate = await breakdownPercent($)
+  if (estimate !== null) {
+    await setContext($, estimate, `${source} breakdown`)
+    $.ui.invalidate('ui.render')
+
+    return
+  }
+
+  const usage = await $.session.usage()
+  const now = usage.context.percent ?? null
+  if (now !== null && (contextPercent === null || now < contextPercent)) {
+    await setContext($, now, `${source} percent`)
+    contextWindow = usage.context.window ?? contextWindow
+    $.ui.invalidate('ui.render')
+  }
+}
+
 // --- Turning state into cells ------------------------------------------------
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
@@ -1143,27 +1174,9 @@ export const register: Register = on => {
   })
 
   // The backstop, for a compaction the hook above did not see or could not
-  // size. The breakdown is the live estimate and is taken as it comes. Failing
-  // that, the plain reading is taken only if it moved DOWN: it is the last
-  // response's figure, and the only way it is present here is if it has not
-  // caught up yet, in which case it is the pre-compaction one and writing it
-  // back would re-pin the stale number.
+  // size; see afterCompaction for what it takes.
   on('classic.PostCompact', async ($, e, next) => {
-    const estimate = await breakdownPercent($)
-    if (estimate !== null) {
-      await setContext($, estimate, 'classic.PostCompact breakdown')
-      $.ui.invalidate('ui.render')
-
-      return next(e)
-    }
-
-    const usage = await $.session.usage()
-    const now = usage.context.percent ?? null
-    if (now !== null && (contextPercent === null || now < contextPercent)) {
-      await setContext($, now, 'classic.PostCompact percent')
-      contextWindow = usage.context.window ?? contextWindow
-      $.ui.invalidate('ui.render')
-    }
+    await afterCompaction($, 'classic.PostCompact')
 
     return next(e)
   })
@@ -1173,8 +1186,26 @@ export const register: Register = on => {
   // to Bash, not to a hooks module, which cost an afternoon to find out. So it
   // is unknown until the first model request of the session, and what shows
   // afterwards is the effort actually sent, after any silent downgrade.
+  //
+  // It is also the one compaction signal nothing seats itself in front of. The
+  // main loop's request after a compaction carries a fraction of the messages
+  // the one before it did -- the transcript was rewritten under it -- so a count
+  // that fell below half is taken as one, on the first request rather than on
+  // the next tick. A subagent's loop starts small and is not the transcript.
+  // A /clear halves it too, and the breakdown then reads an emptied window,
+  // which is right. The reading cannot fail; if it does, the request goes on.
   on('turn.step', async function* ($, e, next) {
     if (typeof e.effort === 'string') effort = e.effort
+    if (e.agentId === undefined) {
+      if (e.messageCount * 2 < mainMessages) {
+        try {
+          await afterCompaction($, 'turn.step')
+        } catch {
+          // the gauge keeps what it has; the model request is not the place to fail
+        }
+      }
+      mainMessages = e.messageCount
+    }
     if (effortOverride !== null && effortOverride !== e.effort) {
       yield* next({ ...e, effort: effortOverride })
 

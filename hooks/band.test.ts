@@ -632,6 +632,76 @@ test('a compaction no hook was allowed to hear is caught by the clock', async ($
   await ui.unmount()
 })
 
+test('the first request after a compaction carries half the messages, and the gauge takes it', async ($, on) => {
+  // The timer above catches a compaction within ten seconds. This catches it on
+  // the first model request after it, which is when the band is being looked
+  // at: `turn.step` is the one event every mod sees, and its `messageCount`
+  // falls to a fraction when the transcript is rewritten under it. The halving
+  // test is Karan Bansal's, from cache-tax. A subagent's loop carries its own
+  // small count and must not pass for the main transcript shrinking.
+  let percent: number | null = 20
+  let estimate: number | null = null
+  const reading = (args: SessionUsageArgs): SessionUsage => ({
+    startedAt: 0,
+    context: {
+      window: 1_000_000,
+      ...(percent === null ? {} : { tokens: percent * 10_000, percent }),
+      ...(args?.breakdown && estimate !== null ? { breakdown: { percentage: estimate } } : {}),
+    } as SessionUsage['context'],
+    rateLimits: [],
+    cost: { usd: 1 },
+  })
+  stand(on, undefined, reading)
+  // The bottom of the turn.step chain: the engine's response, a stream with
+  // nothing in it and a result at the end.
+  on('turn.step', async function* () {
+    return { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  // One request of the main loop, or of a subagent's. The stream has to be
+  // read to its end before `result` settles.
+  const step = async (messageCount: number, agentId?: string) => {
+    const stream = $.turn.step({
+      turnId: 't',
+      index: 0,
+      model: 'claude-opus-5',
+      messageCount,
+      ...(agentId === undefined ? {} : { agentId }),
+    })
+    for await (const _ of stream) {
+      // nothing streams from the stand-in
+    }
+    await stream.result
+  }
+
+  await $.classic.SessionStart({ source: 'startup' })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /ct .* 20%/ })).toBeDefined()
+
+  // The transcript grows: nothing to do, and the breakdown is never asked for.
+  await step(40)
+  await step(44)
+  expect(await ui.find({ type: 'Text', text: /ct .* 20%/ })).toBeDefined()
+
+  // The compaction lands: the percent is gone, the breakdown says 6. A
+  // subagent's first request carries three messages, and is not it.
+  percent = null
+  estimate = 6
+  await step(3, 'agent-1')
+  expect(await ui.find({ type: 'Text', text: /ct .* 20%/ })).toBeDefined()
+
+  // The main loop's next request carries a third of what the last one did.
+  await step(14)
+  expect(await ui.find({ type: 'Text', text: /ct .* 6%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /20%/ })).toBeUndefined()
+
+  // From there the count grows again and the gauge is left to the engine.
+  estimate = 50
+  await step(16)
+  expect(await ui.find({ type: 'Text', text: /ct .* 6%/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
 test('a compaction drops the context gauge instead of pinning the old number', async ($, on) => {
   // `session.measure` does not fire for a compaction: Ban watched a session
   // compact and the `ct` gauge sit at 38%. That number was true when it was
