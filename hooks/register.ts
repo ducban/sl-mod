@@ -1907,7 +1907,7 @@ export const register: Register = on => {
             Text({ color: showReset ? BLUE : MUTED, children: [showReset ? 'on    ' : 'off   '] }),
             Text({
               color: MUTED,
-              wrap: 'truncate-end',
+              wrap: 'wrap',
               children: [`${ICON.reset} after 5h and 7d: time to the reset; the week also turns to a date`],
             }),
           ],
@@ -1926,7 +1926,7 @@ export const register: Register = on => {
             Text({ color: guardOn ? BLUE : MUTED, children: [guardOn ? 'on    ' : 'off   '] }),
             Text({
               color: MUTED,
-              wrap: 'truncate-end',
+              wrap: 'wrap',
               children: ['hold rm -rf, git reset --hard, git clean and a force push; 1 runs, 2 refuses'],
             }),
           ],
@@ -1945,7 +1945,7 @@ export const register: Register = on => {
             Text({ color: coldGateOn ? BLUE : MUTED, children: [coldGateOn ? 'on    ' : 'off   '] }),
             Text({
               color: MUTED,
-              wrap: 'truncate-end',
+              wrap: 'wrap',
               children: ['cold cache: drop the next prompt once, with the re-read; enter again sends it'],
             }),
           ],
