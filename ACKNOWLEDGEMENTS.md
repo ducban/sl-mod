@@ -36,6 +36,11 @@ someone else's repo and written again here.
   in claude-code-playground, Apache-2.0. Idea and shape only; the classifier,
   the measuring scripts and the drawing here were written in this repo after
   reading theirs, and no code was copied, so no NOTICE is owed (sl-mod 0.1.11)
+- Dropping the first prompt after a cold hour once, with what the re-read
+  costs, and sending it on the next Enter; asking once per cold spell, a floor
+  under which the gate stays quiet, and letting a slash command and a prompt
+  nobody typed through: Karan Bansal, cache-tax `hooks/register.ts`, MIT.
+  Written again here without its price table, in tokens (sl-mod 0.1.12)
 
 ## This file
 

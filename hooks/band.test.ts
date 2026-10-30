@@ -59,6 +59,9 @@ const stand = (
   // Answers a process the test cares about (the guard's measuring and its
   // sleeps); one it leaves `undefined` gets the git answers below.
   processes?: (argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult | undefined>,
+  // Every text the mod puts in the prompt box, for the cold gate test; the box
+  // itself reads empty, as a headless one does.
+  fills?: string[],
 ) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
@@ -122,6 +125,14 @@ const stand = (
 
   // The bottom of the classic chain too, so the mod's own hook on it can run.
   on('classic.SessionStart', () => ({}))
+
+  // The prompt box beneath the cold gate: empty to read, and a fill is kept.
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', ($, e) => {
+    fills?.push(e.text)
+
+    return { isFilled: true }
+  })
 
   // The bottom of the measurement chain, so a test can push a figure. It has to
   // echo the event: a result without `changed` is refused and the mod's own hook
@@ -598,6 +609,98 @@ test('the cache cell counts the hour down from the last request, and says cold o
   expect(await ui.find({ type: 'Text', text: /cold/ })).toBeUndefined()
 
   await ui.unmount()
+})
+
+// --- the cold gate -----------------------------------------------------------
+// The world beneath the gate: the request stand-in the cache test uses, and a
+// prompt bottom that records what entered.
+const coldWorld = (on: On, store: Readonly<Record<string, unknown>>) => {
+  const fills: string[] = []
+  const sent: string[] = []
+  const clock = stand(on, undefined, undefined, true, undefined, store, undefined, fills)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.step', async function* () {
+    return { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+
+    return { text: e.text }
+  })
+
+  return { fills, sent, clock }
+}
+
+test('with the cold gate on, the prompt after a cold hour is dropped once, and the next Enter sends it', async ($, on) => {
+  const { fills, sent, clock } = coldWorld(on, { ...FRESH_STORE, coldGate: true })
+  const step = async (messageCount: number) => {
+    const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5', messageCount })
+    for await (const _ of stream) {
+      // nothing streams from the stand-in
+    }
+    await stream.result
+  }
+  const submit = (text: string, kind: 'composer' | 'scheduled-trigger' = 'composer') =>
+    $.prompt.submit({ text, wait: false, origin: { kind } })
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  // Before any request nothing is known about the cache, so nothing is asked.
+  expect((await submit('hello')).drop).toBeUndefined()
+  await step(2)
+  // Warm: through.
+  expect((await submit('warm')).drop).toBeUndefined()
+  expect(sent).toEqual(['hello', 'warm'])
+
+  // The hour goes. The first prompt typed is asked for once: the reason names
+  // the re-read, the draft is put back, and the cell says what answers it.
+  await clock.advance(61 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /cache cold/ })).toBeDefined()
+  const asked = await submit('do the thing')
+  expect(asked.drop).toMatch(/cold for 1m/)
+  expect(asked.drop).toMatch(/about 660\.0k tokens/)
+  expect(fills).toEqual(['do the thing'])
+  expect(sent).toEqual(['hello', 'warm'])
+  expect(await ui.find({ type: 'Text', text: /cache cold . enter sends it/ })).toBeDefined()
+
+  // The next Enter is the answer, and its request warms the cache again.
+  expect((await submit('do the thing')).drop).toBeUndefined()
+  expect(sent).toEqual(['hello', 'warm', 'do the thing'])
+  await step(3)
+  expect(await ui.find({ type: 'Text', text: /cache ▰▰▰▰▰ 1h00m/ })).toBeDefined()
+
+  // Cold again: a slash command and a prompt nobody typed are never asked; the
+  // next typed one is.
+  await clock.advance(61 * 60_000)
+  expect((await submit('/compact')).drop).toBeUndefined()
+  expect((await submit('tick', 'scheduled-trigger')).drop).toBeUndefined()
+  expect((await submit('typed')).drop).toMatch(/cold gate/)
+  expect(fills).toEqual(['do the thing', 'typed'])
+
+  await ui.unmount()
+})
+
+test('with the cold gate off, a cold prompt goes straight through', async ($, on) => {
+  const { fills, sent, clock } = coldWorld(on, FRESH_STORE)
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5', messageCount: 2 })
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  for await (const _ of stream) {
+    // nothing streams from the stand-in
+  }
+  await stream.result
+  await clock.advance(61 * 60_000)
+  expect((await $.prompt.submit({ text: 'typed', wait: false, origin: { kind: 'composer' } })).drop).toBeUndefined()
+  expect(sent).toEqual(['typed'])
+  expect(fills).toEqual([])
 })
 
 // --- the guard ---------------------------------------------------------------

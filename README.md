@@ -329,8 +329,8 @@ straight through.
 `/sl-settings` draws one row per item. Its key moves that item on: line 1, 2, 3,
 4, off, and round again. One key per item and no cursor to lose. Under the
 items sit `reset (t)`, an on/off for the resets after the `5h` and `7d` bars,
-and `guard (a)`, the on/off for the hold above; the effort control sits at the
-bottom of the same pane.
+`guard (a)`, the on/off for the hold above, and `cold gate (k)`, the on/off for
+the ask below; the effort control sits at the bottom of the same pane.
 
 The layout is stored in `$.store`, so it is per machine and outlives the
 session.
@@ -369,6 +369,40 @@ timing the hour from the last request is Karan Bansal's, from cache-tax.
 One thing the cell cannot know: a session in usage overage drops to a
 five-minute cache, and nothing tells a mod. The cell then reads warm for longer
 than it is.
+
+### cold gate
+
+The cell says `cache cold`. With the gate on, that costs a keystroke:
+
+```
+ > fix the flaky test in band.test.ts                      ⏎
+
+ sl-mod cold gate: the prompt cache has been cold for 23m, so this request
+ re-reads about 142.0k tokens at the uncached price before it answers. Enter
+ again sends it as it is; /clear starts a fresh window if this is a new task.
+
+ ct ▰▰▰▱▱ 58%   cache cold · enter sends it   5h ▰▱▱▱▱ 9% ↻2h14m
+ > fix the flaky test in band.test.ts                      ⏎  → sent
+```
+
+The first prompt typed after the hour has gone is dropped once, the draft is put
+back in the box, and the next Enter sends it. Nothing is asked twice in one
+cold spell, and a request clears the ask. The figure is the last response's
+input, which is what the next request re-reads; it is in tokens and not
+dollars, for the reason the next section gives.
+
+What is never asked: a slash command, which is not a model request; a prompt
+typed while a turn runs, which lands on a cache that turn is keeping warm; a
+scheduled trigger, a peer session's message or a plugin's own prompt, which
+have nobody at the keyboard to send them again; and a window under 50k tokens,
+where the re-read is cents. A gate that breaks lets the prompt through, which is
+the engine's default and the right one for a nudge about money. Compacting
+first does not help: the compaction's own request re-reads the same transcript.
+
+Asking once, the floor, and letting slash commands and unattended prompts by
+are Karan Bansal's, from
+[cache-tax](https://github.com/karanb192/cache-tax); the gate here is written
+again without its price table, and off until `k` in `/sl-settings` turns it on.
 
 `ch` — the hit rate — joins the same cell only under **70%**. Above that it
 reads 98–100% and says nothing, and a permanent cell for a constant is spent

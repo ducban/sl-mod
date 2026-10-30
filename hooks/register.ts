@@ -338,6 +338,14 @@ let isAhead = false
 let isHidden = false
 // The guard: off until switched on in /sl-settings, stored like the layout.
 let guardOn = false
+// The cold gate: off until switched on in /sl-settings, stored like the guard.
+// Once the cache's hour has gone, the next prompt typed is dropped once with
+// what re-warming costs in tokens, and the one after goes through. `coldAskedAt`
+// is when it asked; a main-loop request clears it.
+let coldGateOn = false
+let coldAskedAt: number | null = null
+// Under this many tokens the re-read is cents, and a gate on cents is a nag.
+const COLD_GATE_FLOOR = 50_000
 // The countdown after the 5h bar. A preference like the layout, so it is stored
 // and shared by every session on the machine.
 let showReset = true
@@ -1112,6 +1120,19 @@ async function toggleGuard($: EngineInterface) {
   $.ui.invalidate('ui.render')
 }
 
+async function toggleColdGate($: EngineInterface) {
+  coldGateOn = !coldGateOn
+  await $.store.set('coldGate', coldGateOn)
+  $.ui.invalidate('ui.render')
+}
+
+// The reason a dropped prompt shows. The size is the last response's input --
+// what the next request re-reads -- and absent before any response has landed.
+const coldReason = (coldFor: string, size: number | undefined) =>
+  `sl-mod cold gate: the prompt cache has been cold for ${coldFor}, so this request re-reads ${
+    size === undefined ? 'the whole transcript' : `about ${tk(size)} tokens`
+  } at the uncached price before it answers. Enter again sends it as it is; /clear starts a fresh window if this is a new task.`
+
 // --- Turning state into cells ------------------------------------------------
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
@@ -1221,7 +1242,8 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
       const expiresAt = cacheWarmAt + CACHE_TTL_MS
       const left = expiresAt - ctx.now
       if (left <= 0) {
-        parts.push({ fg: RED, text: 'cache cold' })
+        // While the gate has asked, the cell says what answers it.
+        parts.push({ fg: RED, text: coldAskedAt !== null && !ctx.compact ? `cache cold ${ICON.dot} enter sends it` : 'cache cold' })
       } else {
         // The bar drains: five segments of the hour left, rounded up like the
         // quotas, so a minute left still shows one.
@@ -1345,6 +1367,7 @@ export const register: Register = on => {
     isHidden = (await $.store.get('isHidden')) === true
     showReset = (await $.store.get('showReset')) !== false
     guardOn = (await $.store.get('guard')) === true
+    coldGateOn = (await $.store.get('coldGate')) === true
     const saved = await $.store.get('layout')
     if (saved && typeof saved === 'object') {
       // Merged over the defaults, never used as-is: a layout stored before an
@@ -1510,6 +1533,7 @@ export const register: Register = on => {
       // The cache's hour runs from the request; the response's end is the
       // later, safer mark, and the cell takes it below.
       cacheWarmAt = await $.clock.now()
+      coldAskedAt = null
     }
     const result =
       effortOverride !== null && effortOverride !== e.effort
@@ -1609,6 +1633,7 @@ export const register: Register = on => {
         `cache: ${cacheWarmAt === null ? 'no request seen yet' : `warm at ${new Date(cacheWarmAt).toISOString()}, ${countdown(cacheWarmAt + CACHE_TTL_MS, now)} left`}`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `guard: ${guardOn ? 'on' : 'off'}${held === null ? '' : `, holding ${held.risk.label}`}`,
+        `cold gate: ${coldGateOn ? 'on' : 'off'}${coldAskedAt === null ? '' : `, asked at ${new Date(coldAskedAt).toISOString()}`}`,
         `usage endpoint: ${reading.windows.length} window(s)`,
         ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
         `  note=${reading.note || 'ok'}`,
@@ -1680,6 +1705,43 @@ export const register: Register = on => {
   }).catch(() => ({
     deny: 'sl-mod guard hit an error while holding this command and did not run it. Do not retry it unless the user asks you to.',
   }))
+
+  // --- The cold gate: the prompt after a cold hour costs one more Enter ------
+  // The cell says `cache cold`; this makes it cost a keystroke. A prompt typed
+  // at the composer after the hour has gone is dropped once, with the re-read
+  // in tokens, and the next Enter sends it. Only the person's own Enter is
+  // gated: a scheduled trigger, a peer or a plugin has nobody there to send it
+  // again, a slash command is not a model request, and a prompt typed into a
+  // running turn lands on a cache that turn is keeping warm. Under
+  // COLD_GATE_FLOOR tokens it stays quiet. In tokens, not dollars, for the same
+  // reason `i` and `o` are. Asking once per cold spell, the floor, and letting
+  // a slash command and an unattended prompt by are Karan Bansal's, from
+  // cache-tax (see ACKNOWLEDGEMENTS.md). A gate that breaks lets the prompt
+  // through -- the engine's default, and the right one for a nudge about money.
+  on('prompt.submit', async ($, e, next) => {
+    if (!coldGateOn || e.origin.kind !== 'composer' || e.turnId !== undefined || cacheWarmAt === null) return next(e)
+    if (e.text.trimStart().startsWith('/')) return next(e)
+    const now = await $.clock.now()
+    const coldAt = cacheWarmAt + CACHE_TTL_MS
+    if (now < coldAt) return next(e)
+    if (coldAskedAt !== null) {
+      // Asked already, and nothing sent since: this Enter is the answer.
+      coldAskedAt = null
+
+      return next(e)
+    }
+    const size = (await $.session.usage()).context.tokens
+    if (size !== undefined && size < COLD_GATE_FLOOR) return next(e)
+    coldAskedAt = now
+    $.ui.invalidate('ui.render')
+    // Whether a dropped prompt's draft stays in the box is the engine's to say,
+    // and it does not say: so the text is put back if the box is empty, and
+    // left alone if it is not.
+    const box = await $.prompt.read()
+    if (box.text.trim() === '') await $.prompt.fill({ text: e.text })
+
+    return { drop: coldReason(countdown(now, coldAt), size) }
+  })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // A survey owns the band while it is up; stand aside rather than fight it.
@@ -1869,6 +1931,25 @@ export const register: Register = on => {
             }),
           ],
         }),
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Button({
+              key: 'item-cold-gate',
+              label: 'cold gate'.padEnd(9),
+              hotkey: 'k',
+              plain: true,
+              onPress: () => void toggleColdGate($),
+            }),
+            Text({ color: coldGateOn ? BLUE : MUTED, children: [coldGateOn ? 'on    ' : 'off   '] }),
+            Text({
+              color: MUTED,
+              wrap: 'truncate-end',
+              children: ['once the cache has gone cold, the next prompt is dropped once with what the re-read costs in tokens; enter again sends it'],
+            }),
+          ],
+        }),
         Text({ children: [' '] }),
         Text({ color: BLUE, bold: true, children: ['Effort'] }),
         Box({
@@ -1967,6 +2048,7 @@ export const register: Register = on => {
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
         line('effort (e)', 'in /sl-settings: session, low, medium, high, xhigh, max -- picked outright, never nudged'),
         line('guard (a)', `in /sl-settings: hold a risky shell command in the band until 1 runs it or 2 refuses it ${ICON.dot} ${guardOn ? 'on' : 'off'}`),
+        line('cold gate (k)', `in /sl-settings: after a cold hour, the next prompt is dropped once with the re-read in tokens; enter again sends it ${ICON.dot} ${coldGateOn ? 'on' : 'off'}`),
         line('/sl', 'hide or show the band'),
         line('/sl-settings', 'choose what shows, and on which line'),
         line('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),
