@@ -27,6 +27,15 @@ someone else's repo and written again here.
   `hooks/register.tsx`, MIT (sl-mod 0.1.10)
 - The hour measured from the last request, and `cold` as the word for a cache
   that has gone: Karan Bansal, cache-tax, MIT (sl-mod 0.1.10)
+- Holding a risky Bash call until a button is pressed, measuring what it would
+  destroy and drawing that in the band with run and refuse; the hold as a loop
+  of short sleeps through `$.process.run`, since a hook's own time is ten
+  seconds and time inside a `$` call is not its own; the refusal worded so the
+  model does not retry: Claude Code DevRel, Anthropic PBC,
+  [blast-radius](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/blast-radius)
+  in claude-code-playground, Apache-2.0. Idea and shape only; the classifier,
+  the measuring scripts and the drawing here were written in this repo after
+  reading theirs, and no code was copied, so no NOTICE is owed (sl-mod 0.1.11)
 
 ## This file
 

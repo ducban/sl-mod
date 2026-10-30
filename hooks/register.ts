@@ -118,6 +118,7 @@ const ICON = {
   sep: '\u{E0B0}', // the powerline separator between two cells
   dot: '\u{00B7}',
   reset: '\u{21BB}', // before the countdown to a window's reset
+  warn: '\u{26A0}', // before a held command
   up: '\u{25B2}',
   down: '\u{25BC}',
 }
@@ -335,6 +336,8 @@ let branch: string | null = null
 let isDirty = false
 let isAhead = false
 let isHidden = false
+// The guard: off until switched on in /sl-settings, stored like the layout.
+let guardOn = false
 // The countdown after the 5h bar. A preference like the layout, so it is stored
 // and shared by every session on the machine.
 let showReset = true
@@ -852,6 +855,263 @@ async function afterCompaction($: EngineInterface, source: string) {
   }
 }
 
+// --- The guard: a risky shell command waits for you ---------------------------
+// `rm -rf`, `git reset --hard`, `git clean` and a force push each throw
+// something away that git or the disk will not give back. When Claude asks Bash
+// for one, the call is held, what it would destroy is measured and drawn in the
+// band -- this mod owns the band, so there is nothing to fight for it -- and the
+// command runs only on `1`. `2`, Esc, an interrupted turn, an error here, or ten
+// minutes of silence all refuse it, and Claude is told why so it does not try
+// again. The idea, and the shape of the hold, are Blast Radius's, by Claude
+// Code DevRel at Anthropic (Apache-2.0); the code here is this repo's own. See
+// ACKNOWLEDGEMENTS.md.
+//
+// It reads the command text and does not parse shell: `$(...)`, `eval`,
+// `bash -c "..."`, `xargs rm`, `find -delete` and scripts that call rm are not
+// caught. It is a net, not a permission system; a hard block belongs in the
+// permission rules.
+type Risk =
+  | { kind: 'rm'; label: string; targets: string[]; dir: string | null }
+  | { kind: 'git-reset'; label: string; dir: string | null }
+  | { kind: 'git-clean'; label: string; args: string[]; dir: string | null }
+  | { kind: 'git-push-force'; label: string; args: string[]; dir: string | null }
+type Report = { summary: string; lines: string[]; more: number; note: string }
+type Decision = 'run' | 'refuse' | 'interrupted' | 'timeout' | 'error'
+type Held = { command: string; risk: Risk; report: Report | null; decision: Decision | null }
+// The call being held, or null. One at a time: a second risky call waits.
+let held: Held | null = null
+const GUARD_HOLD_MS = 10 * 60_000
+const GUARD_POLL = ['sleep', '0.25'] as const
+const GUARD_LIST = 3
+
+// Words the shell would see, quotes honoured. Enough to read flags and paths.
+const shellWords = (text: string): string[] => {
+  const out: string[] = []
+  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) out.push(m[1] ?? m[2] ?? m[3] ?? '')
+
+  return out
+}
+
+// Where a `cd` lands, relative to where the line was so far.
+const joinDir = (dir: string | null, to: string | undefined) => {
+  if (to === undefined || to === '~' || to.startsWith('/') || to.startsWith('~/')) return to ?? '~'
+
+  return dir === null ? to : `${dir}/${to}`
+}
+
+// Words that sit in front of the real command and change nothing about it.
+const WRAPPERS = new Set(['command', 'exec', 'env', 'nohup', 'time', 'then', 'do', 'else'])
+
+// The first risky segment of a command line, or null. A `cd` earlier on the
+// line moves where the next segment is measured.
+function classifyCommand(command: string): Risk | null {
+  let dir: string | null = null
+  for (const raw of command.split(/&&|\|\||;|\||\n/)) {
+    const words = shellWords(raw.trim().replace(/^[({\s]+/, '').replace(/[)}\s]+$/, ''))
+    while (words.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0] ?? '')) words.shift()
+    if (words[0] === 'sudo') {
+      words.shift()
+      while (words.length > 0 && (words[0] ?? '').startsWith('-')) words.shift()
+    }
+    while (words.length > 0 && WRAPPERS.has(words[0] ?? '')) words.shift()
+    const [first, ...args] = words
+    if (first === undefined) continue
+    const cmd = first.replace(/^\\/, '')
+
+    if (cmd === 'cd') {
+      dir = joinDir(dir, args[0])
+      continue
+    }
+
+    if (cmd === 'rm' || cmd.endsWith('/rm')) {
+      const flags = args.filter(a => a.startsWith('-') && a !== '-')
+      const recursive = flags.some(f => f === '--recursive' || (/^-[^-]/.test(f) && /[rR]/.test(f)))
+      const force = flags.some(f => f === '--force' || (/^-[^-]/.test(f) && f.includes('f')))
+      if (recursive || force) {
+        return { kind: 'rm', label: `rm ${flags.join(' ')}`.trim(), targets: args.filter(a => !flags.includes(a)), dir }
+      }
+    }
+
+    if (cmd === 'git') {
+      let at = 0
+      let gitDir = dir
+      while (at < args.length && (args[at] ?? '').startsWith('-')) {
+        if (args[at] === '-C' || args[at] === '-c') {
+          if (args[at] === '-C') gitDir = joinDir(gitDir, args[at + 1])
+          at += 2
+        } else {
+          at += 1
+        }
+      }
+      const sub = args[at]
+      const rest = args.slice(at + 1)
+      if (sub === 'reset' && rest.includes('--hard')) return { kind: 'git-reset', label: 'git reset --hard', dir: gitDir }
+      if (sub === 'clean') return { kind: 'git-clean', label: 'git clean', args: rest, dir: gitDir }
+      if (
+        sub === 'push' &&
+        rest.some(a => a === '--force' || a === '-f' || a.startsWith('--force-with-lease') || a.startsWith('+'))
+      ) {
+        return { kind: 'git-push-force', label: 'git push --force', args: rest, dir: gitDir }
+      }
+    }
+  }
+
+  return null
+}
+
+// The folder a `cd` names, absolute, or null when it is not there. The name is
+// an argument to bash, never part of its source, so nothing in it runs.
+async function resolveDir($: EngineInterface, from: string, dir: string): Promise<string | null> {
+  const script = 'd="$1"; case "$d" in "~") d="$HOME";; "~/"*) d="$HOME/${d#\\~/}";; esac; cd -- "$d" 2>/dev/null && pwd -P'
+  const run = await $.process.run(['bash', '-c', script, 'sl-mod-guard', dir], { cwd: from, timeoutMs: 5000 })
+  const out = run.stdout.trim()
+
+  return run.exitCode === 0 && out !== '' ? out : null
+}
+
+// Paths are arguments to bash, never source. A glob is expanded by the shell
+// itself, with nullglob so a miss is nothing rather than the pattern; a
+// relative path gets ./ in front so find never reads a file name as an action.
+const RM_SCRIPT = [
+  'shopt -s nullglob dotglob',
+  'found=()',
+  'for p in "$@"; do',
+  '  case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#\\~/}";; esac',
+  '  case "$p" in *[\\*\\?\\[]*) for m in $p; do found+=("$m"); done;; *) if [ -e "$p" ] || [ -L "$p" ]; then found+=("$p"); fi;; esac',
+  'done',
+  'if [ "${#found[@]}" -eq 0 ]; then echo "0 0 0"; exit 0; fi',
+  'for i in "${!found[@]}"; do case "${found[$i]}" in /*|./*|../*) ;; *) found[$i]="./${found[$i]}";; esac; done',
+  'n=$(find "${found[@]}" -type f -o -type l 2>/dev/null | wc -l | tr -d " ")',
+  'kb=$(du -skc "${found[@]}" 2>/dev/null | tail -n 1 | cut -f1)',
+  'echo "$n $(( ${kb:-0} * 1024 )) ${#found[@]}"',
+  `find "\${found[@]}" -type f -o -type l 2>/dev/null | head -n ${GUARD_LIST}`,
+].join('\n')
+
+const bytes = (n: number) => {
+  if (!Number.isFinite(n) || n < 1024) return `${n || 0} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = -1
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
+
+// What the command would do, in a sentence and a short list. Never throws: a
+// measurement that failed is said, not hidden, and the command is still held.
+async function measureRisk($: EngineInterface, risk: Risk, cwd: string): Promise<Report> {
+  try {
+    if (risk.kind === 'rm') {
+      if (risk.targets.length === 0) return { summary: 'rm with no paths', lines: [], more: 0, note: 'nothing to expand' }
+      const run = await $.process.run(['bash', '-c', RM_SCRIPT, 'sl-mod-guard', ...risk.targets], { cwd, timeoutMs: 15000 })
+      const [head = '0 0 0', ...names] = run.stdout.split('\n').filter(l => l !== '')
+      const [files = 0, size = 0, found = 0] = head.split(' ').map(Number)
+      if (found === 0) return { summary: `delete nothing: no file matches ${risk.targets.join(' ')}`, lines: [], more: 0, note: 'the paths are not there' }
+      if (files === 0) return { summary: `delete ${plural(found, 'empty path')}`, lines: [], more: 0, note: risk.targets.join(' ') }
+
+      return {
+        summary: `delete ${plural(files, 'file')} ${ICON.dot} ${bytes(size)}`,
+        lines: names.map(n => n.replace(/^\.\//, '')),
+        more: Math.max(0, files - names.length),
+        note: '',
+      }
+    }
+
+    if (risk.kind === 'git-clean') {
+      const flags: string[] = []
+      const paths: string[] = []
+      for (let i = 0; i < risk.args.length; i += 1) {
+        const a = risk.args[i] ?? ''
+        if (a === '--') {
+          paths.push(...risk.args.slice(i + 1))
+          break
+        }
+        if (a === '-e' || a === '--exclude') {
+          flags.push(a, risk.args[i + 1] ?? '')
+          i += 1
+        } else if (a.startsWith('--exclude=') || /^-e./.test(a)) {
+          flags.push(a)
+        } else if (/^-[a-zA-Z]+$/.test(a)) {
+          // -n is added below; -f, -i and -q would change the dry run.
+          const kept = a.replace(/[finq]/g, '')
+          if (kept !== '-') flags.push(kept)
+        } else if (!a.startsWith('-')) {
+          paths.push(a)
+        }
+      }
+      const run = await $.process.run(['git', 'clean', '-n', ...flags, '--', ...paths], { cwd, timeoutMs: 15000 })
+      if (run.exitCode !== 0) return { summary: 'git clean (could not dry-run it)', lines: [], more: 0, note: run.stderr.trim().slice(0, 160) }
+      const gone = run.stdout.split('\n').filter(l => l.startsWith('Would remove ')).map(l => l.slice('Would remove '.length))
+
+      return {
+        summary: gone.length === 0 ? 'remove nothing: no untracked file matches' : `remove ${plural(gone.length, 'untracked path')}`,
+        lines: gone.slice(0, GUARD_LIST),
+        more: Math.max(0, gone.length - GUARD_LIST),
+        note: gone.length === 0 ? '' : 'untracked files are not in git and cannot be recovered',
+      }
+    }
+
+    if (risk.kind === 'git-push-force') {
+      const positional = risk.args.filter(a => !a.startsWith('-'))
+      const remote = positional[0] ?? 'origin'
+      const spec = (positional[1] ?? '').replace(/^\+/, '')
+      let [source, branch] = spec.includes(':') ? spec.split(':') : [spec, spec]
+      branch = (branch ?? '').replace(/^refs\/heads\//, '')
+      if (branch === '' || branch === 'HEAD') {
+        const head = await $.process.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd, timeoutMs: 10000 })
+        branch = head.stdout.trim()
+        source = 'HEAD'
+      }
+      source = source || 'HEAD'
+      const ref = `${remote}/${branch}`
+      const known = await $.process.run(['git', 'rev-parse', '--verify', '--quiet', ref], { cwd, timeoutMs: 10000 })
+      if (known.exitCode !== 0) {
+        return { summary: `force-push to ${ref}`, lines: [], more: 0, note: `no local copy of ${ref}, so the dropped commits cannot be listed; git fetch first` }
+      }
+      const log = await $.process.run(['git', 'log', '--oneline', '--no-decorate', `${source}..${ref}`], { cwd, timeoutMs: 15000 })
+      const dropped = log.stdout.split('\n').filter(l => l !== '')
+
+      return {
+        summary: dropped.length === 0 ? `force-push to ${ref}: drops no commits` : `force-push to ${ref}: drops ${plural(dropped.length, 'commit')}`,
+        lines: dropped.slice(0, GUARD_LIST),
+        more: Math.max(0, dropped.length - GUARD_LIST),
+        note: dropped.length === 0 ? '' : `on ${ref} and not on ${source}, as of the last fetch`,
+      }
+    }
+
+    // git reset --hard: staged and unstaged changes both go.
+    const status = await $.process.run(['git', 'status', '--porcelain'], { cwd, timeoutMs: 15000 })
+    if (status.exitCode !== 0) return { summary: `${risk.label} (not a git repo here?)`, lines: [], more: 0, note: status.stderr.trim().slice(0, 160) }
+    const rows = status.stdout.split('\n').filter(l => l.length > 3 && !l.startsWith('??'))
+    const stat = await $.process.run(['git', 'diff', '--shortstat', 'HEAD'], { cwd, timeoutMs: 15000 })
+
+    return {
+      summary: rows.length === 0 ? 'discard nothing: no uncommitted changes' : `discard uncommitted changes in ${plural(rows.length, 'file')}`,
+      lines: rows.slice(0, GUARD_LIST).map(l => `${l.slice(0, 2)} ${l.slice(3)}`),
+      more: Math.max(0, rows.length - GUARD_LIST),
+      note: stat.stdout.trim() === '' ? '' : `${stat.stdout.trim()}; uncommitted changes cannot be recovered`,
+    }
+  } catch (error) {
+    return { summary: `${risk.label} (could not measure it)`, lines: [], more: 0, note: String((error as Error)?.message ?? error).slice(0, 160) }
+  }
+}
+
+const guardRefusal = (label: string, summary: string, why: string) =>
+  `sl-mod guard held this command and did not run it: ${why}. It would have: ${summary}. Do not retry it unless the user asks you to.`
+
+async function toggleGuard($: EngineInterface) {
+  guardOn = !guardOn
+  await $.store.set('guard', guardOn)
+  $.ui.invalidate('ui.render')
+}
+
 // --- Turning state into cells ------------------------------------------------
 // Pure data: a colour and a string, no elements. Both the band and the settings
 // pane's preview build from this, so the preview cannot describe a row the band
@@ -1015,6 +1275,13 @@ const lineWidth = (line: Part[]) => line.reduce((n, p) => n + cellWidth(p), 0)
 const lineFor = (n: number, ctx: Ctx): Part[] =>
   ITEMS.filter(item => layout[item.key] === n).flatMap(item => partsFor(item.key, ctx))
 
+const ctxOf = (cwd: string, model: string, now: number): Ctx => ({
+  folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
+  model,
+  windows: shownWindows(now),
+  now,
+})
+
 function buildLines(ctx: Ctx, columns = Infinity): Part[][] {
   const lines: Part[][] = []
   for (let n = 1; n <= MAX_LINES; n += 1) {
@@ -1077,6 +1344,7 @@ export const register: Register = on => {
     // or it is not.
     isHidden = (await $.store.get('isHidden')) === true
     showReset = (await $.store.get('showReset')) !== false
+    guardOn = (await $.store.get('guard')) === true
     const saved = await $.store.get('layout')
     if (saved && typeof saved === 'object') {
       // Merged over the defaults, never used as-is: a layout stored before an
@@ -1340,6 +1608,7 @@ export const register: Register = on => {
         `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
         `cache: ${cacheWarmAt === null ? 'no request seen yet' : `warm at ${new Date(cacheWarmAt).toISOString()}, ${countdown(cacheWarmAt + CACHE_TTL_MS, now)} left`}`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
+        `guard: ${guardOn ? 'on' : 'off'}${held === null ? '' : `, holding ${held.risk.label}`}`,
         `usage endpoint: ${reading.windows.length} window(s)`,
         ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
         `  note=${reading.note || 'ok'}`,
@@ -1348,11 +1617,78 @@ export const register: Register = on => {
     }
   })
 
+  // The guard. Holding needs the hook to wait, and a hook has ten seconds of
+  // its own time; time inside a `$` call is not its own, so the wait is a loop
+  // of short sleeps run as a child process, until a Button's press, the turn's
+  // interruption, or the ten-minute limit sets the decision. A guard that
+  // throws fails open unless its registration says otherwise, so it does.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!guardOn) return next(e)
+    const risk = classifyCommand(String(e.command ?? ''))
+    if (risk === null) return next(e)
+
+    // One at a time. `held` is claimed with no await between the check and the
+    // claim, so two waiting calls cannot both get through.
+    while (held !== null) {
+      if (next.signal.aborted) return { deny: guardRefusal(risk.label, risk.label, 'the turn was interrupted') }
+      await $.process.run([...GUARD_POLL], { timeoutMs: 5000 })
+    }
+    const mine: Held = { command: String(e.command), risk, report: null, decision: null }
+    held = mine
+
+    try {
+      const from = await $.session.cwd()
+      const cwd = risk.dir === null ? from : await resolveDir($, from, risk.dir)
+      mine.report =
+        cwd === null
+          ? { summary: `${risk.label} in ${risk.dir}`, lines: [], more: 0, note: `the folder ${risk.dir} is not there, so this could not be measured` }
+          : await measureRisk($, risk, cwd)
+      $.ui.invalidate('ui.render')
+
+      const startedAt = await $.clock.now()
+      while (mine.decision === null) {
+        if (next.signal.aborted) {
+          mine.decision = 'interrupted'
+          break
+        }
+        if ((await $.clock.now()) - startedAt > GUARD_HOLD_MS) {
+          mine.decision = 'timeout'
+          break
+        }
+        await $.process.run([...GUARD_POLL], { timeoutMs: 5000 })
+      }
+    } catch {
+      mine.decision = 'error'
+    } finally {
+      if (held === mine) held = null
+      $.ui.invalidate('ui.render')
+    }
+
+    if (mine.decision === 'run') {
+      $.ui.toast('sl-mod guard: running it')
+
+      return next(e)
+    }
+    const why: Record<Exclude<Decision, 'run'>, string> = {
+      refuse: 'the user pressed refuse',
+      interrupted: 'the turn was interrupted',
+      timeout: 'no answer within ten minutes',
+      error: 'the guard hit an error while holding it',
+    }
+
+    return { deny: guardRefusal(risk.label, mine.report?.summary ?? risk.label, why[mine.decision ?? 'error']) }
+  }).catch(() => ({
+    deny: 'sl-mod guard hit an error while holding this command and did not run it. Do not retry it unless the user asks you to.',
+  }))
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // A survey owns the band while it is up; stand aside rather than fight it.
-    if (e.props.hasSurvey || isHidden) return next(e)
+    // A held command is drawn even while the band is hidden: it is a question,
+    // and ten minutes of silence would refuse it.
+    const holding = held !== null && held.report !== null ? held : null
+    if (e.props.hasSurvey || (isHidden && holding === null)) return next(e)
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const cwd = await $.session.cwd()
     const model = await $.session.model()
     const now = await $.clock.now()
@@ -1360,16 +1696,12 @@ export const register: Register = on => {
     // While Claude works the spinner is what matters, so the row steps back.
     const dim = e.props.isWorking
 
-    const lines = buildLines(
-      {
-        folder: cwd.replace(/\/+$/, '').split('/').pop() || '/',
-        model,
-        windows: shownWindows(now),
-        now,
-      },
-      e.props.bodyColumns,
-    )
-    if (lines.length === 0) return next(e)
+    const lines = buildLines(ctxOf(cwd, model, now), e.props.bodyColumns)
+    // While a command is held, its report takes row one's place: the budget
+    // rows stay, the identity row is the one you need least just then.
+    if (holding !== null && isHidden) lines.length = 0
+    else if (holding !== null && lines.length > 0 && lineFor(1, ctxOf(cwd, model, now)).length > 0) lines.shift()
+    if (lines.length === 0 && holding === null) return next(e)
 
     // One powerline row. Each cell takes the next cell's background as its
     // separator's foreground, so the two melt into one another; the last
@@ -1396,9 +1728,50 @@ export const register: Register = on => {
         ]
       })
 
+    // The held command's report. The buttons answer the call this was drawn
+    // for, never whichever one is held by the time the key lands. `refuse` has
+    // the focus, so Enter refuses.
+    const guard = (h: Held & { report: Report }) => {
+      const decide = (choice: Decision) => () => {
+        if (h.decision === null) h.decision = choice
+      }
+      const label = (left: string, right: string, color: string) =>
+        Box({
+          flexDirection: 'row',
+          children: [Text({ color: MUTED, children: [left.padEnd(8)] }), Text({ color, bold: true, wrap: 'truncate-end', children: [right] })],
+        })
+
+      return Box({
+        flexDirection: 'column',
+        borderStyle: 'round',
+        borderColor: AMBER,
+        paddingX: 1,
+        children: [
+          Text({ color: AMBER, bold: true, children: [`${ICON.warn} guard ${ICON.dot} ${h.risk.label}`] }),
+          label('command', h.command, FG),
+          label('would', h.report.summary, RED),
+          ...h.report.lines.map(l => Text({ color: FG, wrap: 'truncate-end', children: [`  ${l}`] })),
+          ...(h.report.more > 0 ? [Text({ color: MUTED, children: [`  + ${h.report.more} more`] })] : []),
+          ...(h.report.note !== '' ? [Text({ color: MUTED, italic: true, wrap: 'wrap', children: [h.report.note] })] : []),
+          Box({
+            flexDirection: 'row',
+            columnGap: 2,
+            children: [
+              Button({ key: 'guard-run', label: 'run', hotkey: '1', plain: true, onPress: decide('run') }),
+              Button({ key: 'guard-refuse', label: 'refuse', hotkey: '2', plain: true, autoFocus: true, onPress: decide('refuse') }),
+              Text({ color: MUTED, children: ['Claude is waiting on your answer'] }),
+            ],
+          }),
+        ],
+      })
+    }
+
     return Box({
       flexDirection: 'column',
-      children: lines.map(line => Box({ flexDirection: 'row', children: row(line) })),
+      children: [
+        ...(holding !== null ? [guard(holding as Held & { report: Report })] : []),
+        ...lines.map(line => Box({ flexDirection: 'row', children: row(line) })),
+      ],
     })
   })
 
@@ -1474,6 +1847,25 @@ export const register: Register = on => {
               color: MUTED,
               wrap: 'truncate-end',
               children: [`${ICON.reset} after 5h and 7d: until the window resets; the week turns between countdown and date`],
+            }),
+          ],
+        }),
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Button({
+              key: 'item-guard',
+              label: 'guard'.padEnd(9),
+              hotkey: 'a',
+              plain: true,
+              onPress: () => void toggleGuard($),
+            }),
+            Text({ color: guardOn ? BLUE : MUTED, children: [guardOn ? 'on    ' : 'off   '] }),
+            Text({
+              color: MUTED,
+              wrap: 'truncate-end',
+              children: ['hold rm -rf, git reset --hard, git clean and a force push in the band, with what they would destroy, until you press 1 or 2'],
             }),
           ],
         }),
@@ -1574,6 +1966,7 @@ export const register: Register = on => {
         gap,
         Text({ color: BLUE, bold: true, children: ['Keys and commands'] }),
         line('effort (e)', 'in /sl-settings: session, low, medium, high, xhigh, max -- picked outright, never nudged'),
+        line('guard (a)', `in /sl-settings: hold a risky shell command in the band until 1 runs it or 2 refuses it ${ICON.dot} ${guardOn ? 'on' : 'off'}`),
         line('/sl', 'hide or show the band'),
         line('/sl-settings', 'choose what shows, and on which line'),
         line('/sl-effort <level>', 'set it outright, or `off` to stop overriding'),

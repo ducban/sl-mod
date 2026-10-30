@@ -248,12 +248,89 @@ Unlike the layout, the effort choice is **not** stored. The layout is a
 preference that outlives the session; the effort of the requests this session
 sends is not.
 
+## The guard
+
+The band was only ever a reading. This is the first thing on it that asks.
+
+Four shell commands throw something away that neither git nor the disk gives
+back: `rm -rf`, `git reset --hard`, `git clean`, and a force push. With the
+guard on, a Bash call for one of them is held before it runs, what it would
+destroy is measured, and the report takes row one's place in the band:
+
+```
+ ╭─ ⚠ guard · rm -rf ────────────────────────────────────────────────╮
+ │ command  rm -rf build                                              │
+ │ would    delete 1,204 files · 38 MB                                │
+ │   build/index.js                                                   │
+ │   build/chunk-1f3a.js                                              │
+ │   build/assets/logo.svg                                            │
+ │   + 1,201 more                                                     │
+ │ 1: run   2: refuse   Claude is waiting on your answer              │
+ ╰────────────────────────────────────────────────────────────────────╯
+ ct ▰▰▰▰▱ 66%   5h ▰▱▱▱▱ 9% ↻2h14m   7d ▰▰▱▱▱ 39% ↻3d15h
+```
+
+`1` runs it as written. `2`, Esc on the turn, ten minutes of silence, or an
+error in the guard itself all refuse it, and Claude reads why — *"the user
+pressed refuse. It would have: delete 1,204 files"* — so it does not try the
+same line again. `refuse` holds the focus, so Enter refuses. The budget row
+stays under the report; the identity row is the one you need least just then.
+A held command is drawn even while the band is hidden with `/sl`: it is a
+question, and silence would answer it.
+
+What each one measures:
+
+| Command | Shown |
+|---|---|
+| `rm -r`, `rm -f`, `rm -rf` | the files it would delete, count and size; globs and `~` expanded |
+| `git reset --hard` | the files with uncommitted changes, and `git diff --shortstat` |
+| `git clean` | what `git clean -n` with the same flags would remove |
+| `git push --force`, `-f`, `--force-with-lease`, `+ref` | the commits on the remote branch that the push would drop, as of the last fetch |
+
+A `cd dir &&` or `git -C dir` earlier on the line moves where it is measured.
+Paths go to `bash`, `find`, `du` and `git` as **arguments**, never as source, so
+nothing in a file name runs. A relative path gets `./` in front, so `find` never
+reads a name like `-delete` as an action.
+
+How the hold works: a hook has ten seconds of its own time, which is no time to
+wait for a person, but time inside a `$` call is not its own. So the hold is a
+loop that sleeps a quarter second at a time through `$.process.run(['sleep'])`
+until a button's `onPress` sets the decision, the turn's `next.signal` aborts,
+or ten minutes pass. One command is held at a time; a second risky call waits
+for the first. A guard that throws fails *open* unless its registration carries
+a `.catch`, so it does, and the handler refuses.
+
+What it does not do: it reads the command text and does not parse shell.
+`$(...)`, `eval`, `bash -c "..."`, `xargs rm`, `find -delete`, and scripts that
+call `rm` are not caught. It is a net, not a permission system; a hard block
+belongs in the permission rules. It is **off** by default and switched on with
+`guard (a)` in `/sl-settings`, stored like the layout.
+
+The idea, and the shape of the hold, are Blast Radius's, by Claude Code DevRel
+at Anthropic, in
+[claude-code-playground](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods/blast-radius)
+(Apache-2.0). The code here is this repo's own, written after reading theirs;
+see `ACKNOWLEDGEMENTS.md`. The reason it lives in this mod and not beside it:
+Blast Radius draws its report in the band when the terminal is too narrow for
+a pane, and its README says the band is one mod's at a time. This mod is that
+mod. Inside it, there is nothing to fight for.
+
+Three tests stand in for the engine beneath: Bash answered by a recorder,
+processes by a script, the hold loop's sleeps by waits on the mock clock, so
+each `advance` is one turn of the loop. One holds `rm -rf build`, checks the
+report and that the budget row stayed, presses refuse and reads the deny. One
+lets `ls` through untouched, then holds `cd sub && git push --force origin
+main`, checks the measuring ran in `sub` against `main..origin/main`, presses
+run and sees Bash called. One has the guard off and sees `git reset --hard` go
+straight through.
+
 ## What goes where
 
 `/sl-settings` draws one row per item. Its key moves that item on: line 1, 2, 3,
 4, off, and round again. One key per item and no cursor to lose. Under the
-items sits `reset (t)`, an on/off for the resets after the `5h` and `7d` bars,
-and the effort control sits at the bottom of the same pane.
+items sit `reset (t)`, an on/off for the resets after the `5h` and `7d` bars,
+and `guard (a)`, the on/off for the hold above; the effort control sits at the
+bottom of the same pane.
 
 The layout is stored in `$.store`, so it is per machine and outlives the
 session.

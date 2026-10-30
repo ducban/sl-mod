@@ -1,4 +1,4 @@
-import type { On, SessionUsage, SessionUsageArgs } from 'claude-code'
+import type { On, ProcessRunInit, ProcessRunResult, SessionUsage, SessionUsageArgs } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 // The band has to draw on every surface it claims, and the rotate keys have to
@@ -56,6 +56,9 @@ const stand = (
   // What `$.store` holds when the session starts: another session's shared
   // usage reading, for the tests that must not reach the network.
   store?: Readonly<Record<string, unknown>>,
+  // Answers a process the test cares about (the guard's measuring and its
+  // sleeps); one it leaves `undefined` gets the git answers below.
+  processes?: (argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult | undefined>,
 ) => {
   // mock answers clock, store and env from memory; `on` is how it registers.
   // Registered exactly once per test: a second mock.clock(on) fails the module
@@ -96,7 +99,9 @@ const stand = (
   // answer differently here: a clean branch in the --porcelain=v2 shape
   // refreshGit parses, and a repo with no tags -- `git describe` exiting 1,
   // which is what both of these repos actually do.
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
+    const own = processes === undefined ? undefined : await processes(e.argv, e.init)
+    if (own !== undefined) return { value: own }
     const isStatus = e.argv[1] === 'status'
 
     return {
@@ -593,6 +598,146 @@ test('the cache cell counts the hour down from the last request, and says cold o
   expect(await ui.find({ type: 'Text', text: /cold/ })).toBeUndefined()
 
   await ui.unmount()
+})
+
+// --- the guard ---------------------------------------------------------------
+// A held call is a hook that has not returned. The test starts the call, waits
+// for the band to draw the report, presses a button, and only then awaits the
+// call. The hold loop sleeps through `$.process.run(['sleep', ...])`; the
+// stand-in answers that by waiting on the mock clock, so each `advance` here is
+// one turn of the loop.
+
+const FRESH_STORE = { usage: { windows: [{ kind: 'five_hour', percentUsed: 8 }], fetchedAt: 0, nextAllowedAt: 0 } }
+
+const exited = (stdout: string, exitCode = 0): ProcessRunResult =>
+  ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }) as ProcessRunResult
+
+// The world beneath the guard: Bash answered by a recorder, processes by a
+// script of the test's. `stand` owns the process.run registration, so this
+// hands it the script and keeps the records.
+const beneath = (on: On, store: Readonly<Record<string, unknown>>, answer: (argv: readonly string[]) => string | null) => {
+  const ran: string[] = []
+  // The git refresh at session.start runs `git status` on its own; it is not
+  // the guard's, so it is not kept.
+  const processes: { argv: readonly string[]; cwd?: string }[] = []
+  on('tool.call', ($, e) => {
+    ran.push(String((e as { command?: unknown }).command))
+
+    return { result: { stdout: '', stderr: '' } }
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  const clock = stand(on, undefined, undefined, true, undefined, store, async (argv, init) => {
+    if (argv[1] !== 'status') processes.push({ argv, cwd: init?.cwd })
+    if (argv[0] === 'sleep') {
+      await clock.sleep(250)
+
+      return exited('')
+    }
+    const out = answer(argv)
+
+    return out === null ? exited('', 1) : exited(out)
+  })
+  // Turns the hold loop until the band draws what is asked for.
+  const until = async (ui: { find: (q: { type: 'Text'; text: RegExp }) => Promise<unknown> }, text: RegExp) => {
+    for (let i = 0; i < 40; i += 1) {
+      await clock.advance(250)
+      if ((await ui.find({ type: 'Text', text })) !== undefined) return
+    }
+    throw new Error(`the band never drew ${text}`)
+  }
+
+  return { ran, processes, clock, until }
+}
+
+test('with the guard on, rm -rf is held in the band, and refuse answers it with a deny', async ($, on) => {
+  const { ran, processes, clock, until } = beneath(on, { ...FRESH_STORE, guard: true }, argv =>
+    argv[0] === 'bash' ? '3 2048 1\nbuild/a.js\nbuild/b.js\nbuild/c.js\n' : '',
+  )
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /Opus 5/ })).toBeDefined()
+
+  const call = $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
+  await until(ui, /guard · rm -rf/)
+
+  // The report, in row one's place: the budget row stays.
+  expect(await ui.find({ type: 'Text', text: /delete 3 files · 2\.0 KB/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /build\/a\.js/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Opus 5/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /ct .* 66%/ })).toBeDefined()
+  // Measured in the session's folder, the paths as arguments and not as source.
+  const measure = processes.find(p => p.argv[0] === 'bash')
+  expect(measure?.cwd).toBe('/home/bannd/Workspace/Projects/personal_works/sl-mod')
+  expect(measure?.argv.slice(-2)).toEqual(['sl-mod-guard', 'build'])
+
+  await ui.press({ key: 'guard-refuse' })
+  await clock.advance(250)
+  const answer = await call
+  expect(answer.deny).toMatch(/pressed refuse/)
+  expect(answer.deny).toMatch(/delete 3 files/)
+  expect(ran).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /guard/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Opus 5/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('run lets a held force push through, measured where a cd moved it; a harmless command is never held', async ($, on) => {
+  const { ran, processes, clock, until } = beneath(on, { ...FRESH_STORE, guard: true }, argv => {
+    if (argv[0] === 'bash') return '/home/bannd/Workspace/Projects/personal_works/sl-mod/sub\n' // the cd
+    if (argv[1] === 'rev-parse') return 'abc123\n'
+    if (argv[1] === 'log') return 'abc123 a commit only the remote has\n'
+
+    return ''
+  })
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+
+  // Harmless: straight through, nothing measured, nothing drawn.
+  const plain = await $.tool.call({ tool: 'Bash', command: 'ls -la && git status' })
+  expect(plain.deny).toBeUndefined()
+  expect(ran).toEqual(['ls -la && git status'])
+  expect(processes).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /guard/ })).toBeUndefined()
+
+  const call = $.tool.call({ tool: 'Bash', command: 'cd sub && git push --force origin main' })
+  await until(ui, /guard · git push --force/)
+  expect(await ui.find({ type: 'Text', text: /drops 1 commit/ })).toBeDefined()
+  const log = processes.find(p => p.argv[1] === 'log')
+  expect(log?.cwd).toBe('/home/bannd/Workspace/Projects/personal_works/sl-mod/sub')
+  expect(log?.argv.at(-1)).toBe('main..origin/main')
+
+  await ui.press({ key: 'guard-run' })
+  await clock.advance(250)
+  const answer = await call
+  expect(answer.deny).toBeUndefined()
+  expect(ran).toEqual(['ls -la && git status', 'cd sub && git push --force origin main'])
+
+  await ui.unmount()
+})
+
+test('with the guard off, a risky command is not held', async ($, on) => {
+  const { ran, processes } = beneath(on, FRESH_STORE, () => '')
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const answer = await $.tool.call({ tool: 'Bash', command: 'git reset --hard' })
+  expect(answer.deny).toBeUndefined()
+  expect(ran).toEqual(['git reset --hard'])
+  expect(processes).toEqual([])
 })
 
 test('a repo with no version does not take the git cell down with it', async ($, on) => {
