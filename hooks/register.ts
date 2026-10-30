@@ -119,6 +119,7 @@ const ICON = {
   dot: '\u{00B7}',
   reset: '\u{21BB}', // before the countdown to a window's reset
   warn: '\u{26A0}', // before a held command
+  cross: '\u{2717}', // a subagent that did not answer
   up: '\u{25B2}',
   down: '\u{25BC}',
 }
@@ -204,6 +205,7 @@ type ItemKey =
   | 'cost'
   | 'speed'
   | 'turn'
+  | 'agents'
 
 const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
   { key: 'dir', hotkey: 'd', name: 'dir', about: 'the working directory, last segment only' },
@@ -222,6 +224,7 @@ const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
   { key: 'cost', hotkey: 'u', name: 'cost', about: 'what this session has cost, in USD' },
   { key: 'speed', hotkey: 's', name: 'speed', about: 'output tokens a second, over the last request' },
   { key: 'turn', hotkey: 'n', name: 'turn', about: 'what the last turn cost, and how long it ran' },
+  { key: 'agents', hotkey: 'b', name: 'agents', about: 'how many subagents are running; /sl-agents lists them' },
 ]
 
 // 0 is off; 1 to 4 is which line it sits on. Four lines is the cap.
@@ -244,6 +247,7 @@ const DEFAULT_LAYOUT: Layout = {
   cost: 0,
   speed: 0,
   turn: 0,
+  agents: 2,
 }
 let layout: Layout = { ...DEFAULT_LAYOUT }
 
@@ -397,6 +401,29 @@ const SPEED_MIN_MS = 1_000
 let turnCostAtStart: number | null = null
 let lastTurn: { usd: number | null; ms: number } | null = null
 
+// The session's subagents, one row each, from the events their loops raise:
+// `agent.spawn` opens a row, each `turn.step` in that loop adds a request and
+// its tokens, `turn.complete` closes it. The cell counts the open rows; the
+// /sl-agents pane lists them all, checking the open ones against the engine's
+// own list when drawn, since a loop the engine killed raises no completion.
+// Thirty rows are kept; a session that spawns more is a session reading its
+// own history, not the band. The ledger is johnnyvizz's idea, from
+// savvy-progress (see ACKNOWLEDGEMENTS.md).
+type AgentRun = {
+  id: string
+  type: string
+  description: string
+  model: string | null
+  status: 'running' | 'done' | 'failed'
+  startedAt: number
+  endedAt: number | null
+  steps: number
+  tokens: number
+}
+let agents: AgentRun[] = []
+const AGENTS_KEPT = 30
+const agentsRunning = () => agents.filter(a => a.status === 'running').length
+
 // The prompt cache lives an hour from the last request that touched it, and a
 // request after that re-reads the whole transcript at the uncached price. The
 // cell counts that hour down from the main loop's last request -- `turn.step`
@@ -433,6 +460,7 @@ const tk = (n: number) =>
 
 const LEGEND = 'sl-legend'
 const SETTINGS = 'sl-settings'
+const AGENTS = 'sl-agents'
 
 // The engine draws no title for a lone pane and a tab strip the moment a second
 // one is open -- "one shown, the rest tabs" (PaneOpenArgs.title). So the tabs
@@ -442,6 +470,7 @@ const SETTINGS = 'sl-settings'
 const PANES: { id: string; title: string }[] = [
   { id: LEGEND, title: 'sl help' },
   { id: SETTINGS, title: 'sl settings' },
+  { id: AGENTS, title: 'sl agents' },
 ]
 
 async function openTabs($: EngineInterface, show: string) {
@@ -1311,6 +1340,13 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
     return [{ fg: FG, text: `turn ${cost}${elapsed(lastTurn.ms)}` }]
   }
 
+  if (key === 'agents') {
+    const n = agentsRunning()
+    if (n === 0) return []
+
+    return [{ fg: FG, text: ctx.compact ? `ag ${n}` : `${n} agent${n === 1 ? '' : 's'} running` }]
+  }
+
   // Everything left is a rate-limit window, and there may be several of a kind.
   return ctx.windows
     .filter(w => itemForWindow(w) === key)
@@ -1397,6 +1433,7 @@ export const register: Register = on => {
       ['sl-settings', 'Choose what the status line shows, and on which line'],
       ['sl-effort', 'Set reasoning effort: low, medium, high, xhigh, max, or off'],
       ['sl-debug', 'Print the raw session usage the status line reads'],
+      ['sl-agents', 'List the subagents this session has run'],
     ] as const) {
       await $.command.register({ name, description })
     }
@@ -1590,6 +1627,18 @@ export const register: Register = on => {
       yield chunk
     }
     const result = await stream.result
+    if (e.agentId !== undefined) {
+      const run = agents.find(a => a.id === e.agentId)
+      if (run !== undefined) {
+        run.steps += 1
+        if (result.usage !== null) {
+          const u = result.usage
+          run.tokens += u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+          run.model = u.model || e.model
+        }
+        $.ui.invalidate('ui.render')
+      }
+    }
     if (e.agentId === undefined) {
       cacheWarmAt = await $.clock.now()
       $.ui.invalidate('ui.render')
@@ -1613,6 +1662,14 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId !== undefined) {
+      const run = agents.find(a => a.id === e.agentId)
+      if (run !== undefined) {
+        run.status = e.reason === 'answer' ? 'done' : 'failed'
+        run.endedAt = await $.clock.now()
+        $.ui.invalidate('ui.render')
+      }
+    }
     if (e.agentId === undefined) {
       let usd: number | null = null
       try {
@@ -1626,6 +1683,29 @@ export const register: Register = on => {
     }
 
     return result
+  })
+
+  // A subagent's row opens once the engine says it started. Not a guard: a
+  // spawn this hook fails on starts anyway, and the row is simply missing.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.agentId !== undefined) {
+      agents.push({
+        id: started.agentId,
+        type: e.subagentType,
+        description: e.description,
+        model: started.model ?? e.model ?? null,
+        status: 'running',
+        startedAt: await $.clock.now(),
+        endedAt: null,
+        steps: 0,
+        tokens: 0,
+      })
+      if (agents.length > AGENTS_KEPT) agents = agents.slice(-AGENTS_KEPT)
+      $.ui.invalidate('ui.render')
+    }
+
+    return started
   })
 
   // The second source for effort, and the one that actually answers. `turn.step`
@@ -1665,6 +1745,12 @@ export const register: Register = on => {
 
   on('command.run', { command: 'sl-settings' }, async $ => {
     await openTabs($, SETTINGS)
+
+    return {}
+  })
+
+  on('command.run', { command: 'sl-agents' }, async $ => {
+    await openTabs($, AGENTS)
 
     return {}
   })
@@ -1713,6 +1799,7 @@ export const register: Register = on => {
         `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
         `cache: ${cacheWarmAt === null ? 'no request seen yet' : `warm at ${new Date(cacheWarmAt).toISOString()}, ${countdown(cacheWarmAt + CACHE_TTL_MS, now)} left`}`,
         `speed: ${speed === null ? 'not timed yet' : `${speed} tok/s`}; last turn: ${lastTurn === null ? 'none' : `${lastTurn.usd === null ? 'cost unknown' : `$${lastTurn.usd.toFixed(2)}`}, ${elapsed(lastTurn.ms)}`}`,
+        `agents: ${agentsRunning()} running, ${agents.filter(a => a.status === 'done').length} done, ${agents.filter(a => a.status === 'failed').length} failed`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `guard: ${guardOn ? 'on' : 'off'}${held === null ? '' : `, holding ${held.risk.label}`}`,
         `cold gate: ${coldGateOn ? 'on' : 'off'}${coldAskedAt === null ? '' : `, asked at ${new Date(coldAskedAt).toISOString()}`}`,
@@ -2087,6 +2174,57 @@ export const register: Register = on => {
   // The legend. A pane rather than a toast: a toast is gone in four seconds and
   // this is a page to read. It is drawn from the same values the band uses, so
   // it cannot describe a row the band is not showing.
+  // The subagents, newest last. A row still open is checked against the
+  // engine's list: a loop the engine killed or that failed raises no completion
+  // this ledger hears, and a row that read `running` for ever would be a lie.
+  on('ui.render', { component: 'Pane', requestId: AGENTS }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const now = await $.clock.now()
+    try {
+      const live = await $.agent.list()
+      for (const run of agents) {
+        if (run.status !== 'running') continue
+        const known = live.find(a => a.id === run.id)
+        if (known === undefined) continue
+        if (known.status === 'completed') run.status = 'done'
+        else if (known.status === 'failed' || known.status === 'killed') run.status = 'failed'
+        if (run.status !== 'running') run.endedAt = now
+      }
+    } catch {
+      // the ledger stands on its own
+    }
+    const glyph = (run: AgentRun) =>
+      run.status === 'running' ? { fg: AMBER, text: ICON.dirty } : run.status === 'done' ? { fg: GREEN, text: ICON.clean } : { fg: RED, text: ICON.cross }
+    const row = (run: AgentRun) => {
+      const g = glyph(run)
+      const span = elapsed((run.endedAt ?? now) - run.startedAt)
+      const figures = `${run.steps} req ${ICON.dot} ${tk(run.tokens)} tok ${ICON.dot} ${span}`
+
+      return Box({
+        flexDirection: 'row',
+        columnGap: 1,
+        children: [
+          Text({ color: g.fg, children: [g.text] }),
+          Text({ color: FG, children: [run.type.slice(0, 16).padEnd(16)] }),
+          Text({ color: MUTED, children: [figures.padEnd(30)] }),
+          Text({ color: FG, wrap: 'truncate-end', children: [run.description] }),
+        ],
+      })
+    }
+
+    return Box({
+      flexDirection: 'column',
+      children: [
+        Text({ color: BLUE, bold: true, children: [`Subagents this session ${ICON.dot} ${agentsRunning()} running`] }),
+        Text({ color: MUTED, wrap: 'wrap', children: [`${ICON.dirty} running  ${ICON.clean} answered  ${ICON.cross} failed, aborted or killed; requests, tokens over them, and how long the loop ran`] }),
+        Text({ children: [' '] }),
+        ...(agents.length === 0 ? [Text({ color: MUTED, children: ['none spawned yet'] })] : agents.map(row)),
+        Text({ children: [' '] }),
+        Text({ color: MUTED, children: [`${ICON.dot} esc closes ${ICON.dot} tab to the other sl tabs and enter, or click one`] }),
+      ],
+    })
+  })
+
   on('ui.render', { component: 'Pane', requestId: LEGEND }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const line = (left: string, right: string) =>

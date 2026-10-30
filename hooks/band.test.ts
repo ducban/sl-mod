@@ -126,6 +126,10 @@ const stand = (
   // The bottom of the classic chain too, so the mod's own hook on it can run.
   on('classic.SessionStart', () => ({}))
 
+  // The engine's own list of agents, for the agents pane to check its rows
+  // against: nothing, so the ledger is what the test drives.
+  on('agent.list', () => ({ value: [] }))
+
   // The prompt box beneath the cold gate: empty to read, and a fill is kept.
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => {
@@ -678,6 +682,77 @@ test('the speed cell times the last request, and the turn cell prices the last t
   await ui.unmount()
 })
 
+// --- subagents ---------------------------------------------------------------
+const AGENTS_PANE = {
+  component: 'Pane' as const,
+  requestId: 'sl-agents',
+  props: {
+    title: 'sl agents',
+    isFocused: true,
+    bodyColumns: 100,
+    placement: 'inline' as const,
+    scroll: { offset: 0, bodyRows: 30 },
+    view: {},
+  },
+}
+
+test('a spawned subagent is counted on the band while it runs, and listed in the agents pane after', async ($, on) => {
+  const clock = stand(on, undefined, undefined, true, undefined, FRESH_STORE)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5', agentId: 'agent-1' }))
+  on('turn.complete', () => ({ text: '' }))
+  on('turn.step', async function* ($, e) {
+    const usage = { model: 'claude-sonnet-5', input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 40000, cache_creation_input_tokens: 0 }
+
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const band = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  const pane = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...AGENTS_PANE })
+  expect(await band.find({ type: 'Text', text: /agent/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /none spawned yet/ })).toBeDefined()
+
+  const started = await $.agent.spawn({
+    tool_use_id: 'tu-1',
+    prompt: 'Find every test that reads the clock.',
+    description: 'find clock tests',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5',
+    background: false,
+    fork: false,
+  })
+  expect(started.agentId).toBe('agent-1')
+  expect(await band.find({ type: 'Text', text: /1 agent running/ })).toBeDefined()
+
+  // Two requests in its loop, a minute apart: the row carries both.
+  for (let i = 0; i < 2; i += 1) {
+    const stream = $.turn.step({ turnId: 'ta', index: i, model: 'claude-sonnet-5', messageCount: 3, agentId: 'agent-1' })
+    for await (const _ of stream) {
+      // nothing streams from the stand-in
+    }
+    await stream.result
+    await clock.advance(30_000)
+  }
+  expect(await pane.find({ type: 'Text', text: /Explore/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /2 req . 82\.4k tok . 1m00s/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /find clock tests/ })).toBeDefined()
+
+  // It answers: off the band, kept in the pane as answered.
+  await $.turn.complete({ answer: 'done', durationMs: 60_000, isAborted: false, turnId: 'ta', agentId: 'agent-1', reason: 'answer' })
+  expect(await band.find({ type: 'Text', text: /agent/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /0 running/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✓/ })).toBeDefined()
+
+  await band.unmount()
+  await pane.unmount()
+})
+
 // --- the cold gate -----------------------------------------------------------
 // The world beneath the gate: the request stand-in the cache test uses, and a
 // prompt bottom that records what entered.
@@ -1162,6 +1237,7 @@ test('a /sl-* command opens both panes, so the engine draws them as tabs', async
   await run('sl-help')
   expect(opens).toEqual([
     { id: 'sl-settings', focus: false },
+    { id: 'sl-agents', focus: false },
     { id: 'sl-legend', focus: true },
   ])
 
@@ -1169,6 +1245,15 @@ test('a /sl-* command opens both panes, so the engine draws them as tabs', async
   await run('sl-settings')
   expect(opens).toEqual([
     { id: 'sl-legend', focus: false },
+    { id: 'sl-agents', focus: false },
     { id: 'sl-settings', focus: true },
+  ])
+
+  opens.length = 0
+  await run('sl-agents')
+  expect(opens).toEqual([
+    { id: 'sl-legend', focus: false },
+    { id: 'sl-settings', focus: false },
+    { id: 'sl-agents', focus: true },
   ])
 })

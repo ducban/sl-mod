@@ -44,6 +44,11 @@ someone else's repo and written again here.
 - Output tokens a second, timed from a request's first chunk to its stop, and
   a turn's cost as the session total at its end less the total at its start:
   johnnyvizz, session-band `hooks/register.tsx`, MIT (sl-mod 0.1.14)
+- A ledger of the session's subagents built from `agent.spawn`, each loop's
+  `turn.step` and its `turn.complete`, drawn as a pane with a row an agent:
+  johnnyvizz, [savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress)
+  `hooks/register.tsx`, MIT. The flow planning in theirs is not here
+  (sl-mod 0.1.15)
 
 ## This file
 

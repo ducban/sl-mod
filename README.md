@@ -197,7 +197,8 @@ strip the moment a second one is open -- `PaneOpenArgs.title` says so outright:
 "The pane's tab while more than one pane is open (with one, no title is drawn)",
 and the `Pane` render event: "one shown, the rest tabs".
 
-So `/sl-help` and `/sl-settings` each open both panes and raise their own.
+So `/sl-help`, `/sl-settings` and `/sl-agents` each open all three panes and
+raise their own.
 `focus: true` raises as well as focuses, which is why the asked-for pane is
 opened last. A click on the other tab shows it, or Tab onto it and Enter.
 
@@ -441,6 +442,34 @@ subagent's requests and turns touch neither. Both are johnnyvizz's, from
 [session-band](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/session-band),
 written again here.
 
+### agents
+
+```
+ ct ▰▰▰▰▱ 66%   cache ▰▰▰▰▰ 1h00m   2 agents running
+```
+
+The `agents` cell is on line two by default and empty until a subagent runs;
+then it counts the ones running, and `ag 2` on a narrow line. `/sl-agents` is
+the third tab, one row a subagent:
+
+```
+ Subagents this session · 1 running
+ ● running  ✓ answered  ✗ failed, aborted or killed; …
+
+ ✓ Explore           4 req · 112.0k tok · 1m48s         find clock tests
+ ● general-purpose   2 req · 82.4k tok · 38s            write the migration
+```
+
+The ledger is built from the events a subagent's loop raises: `agent.spawn`
+opens a row once the engine says it started, each `turn.step` in that loop adds
+a request and its tokens (uncached, cache-read and cache-written input, and
+output), and `turn.complete` closes it as answered or failed. A loop the engine
+killed raises no completion this mod hears, so the pane checks its open rows
+against `$.agent.list()` when it is drawn. Thirty rows are kept. The idea of
+the ledger is johnnyvizz's, from
+[savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress);
+their panel also plans and reports a flow, which this one does not.
+
 ### version
 
 `⌂ 0.1.2` is the **open project's** version, not the engine's, read in this
@@ -538,8 +567,10 @@ down, and it was read past every time.
 | `/sl-help` | the legend: every item, how to read a gauge, the keys |
 | `/sl-effort <level>` | set it outright, or `off` to stop overriding |
 | `/sl-debug` | print what the engine reports, notes included |
+| `/sl-agents` | the subagents this session has run: running, answered, failed |
 
-`/sl-help` and `/sl-settings` are the two tabs. `/sl-debug` prints text.
+`/sl-help`, `/sl-settings` and `/sl-agents` are the three tabs. `/sl-debug`
+prints text.
 
 ## The statusLine it replaced
 
