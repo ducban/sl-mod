@@ -202,6 +202,8 @@ type ItemKey =
   | 'output'
   | 'cache'
   | 'cost'
+  | 'speed'
+  | 'turn'
 
 const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
   { key: 'dir', hotkey: 'd', name: 'dir', about: 'the working directory, last segment only' },
@@ -218,6 +220,8 @@ const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
   { key: 'output', hotkey: 'o', name: 'output', about: 'output tokens this session' },
   { key: 'cache', hotkey: 'h', name: 'cache', about: 'the hour left on the prompt cache, and the hit rate once it is low' },
   { key: 'cost', hotkey: 'u', name: 'cost', about: 'what this session has cost, in USD' },
+  { key: 'speed', hotkey: 's', name: 'speed', about: 'output tokens a second, over the last request' },
+  { key: 'turn', hotkey: 'n', name: 'turn', about: 'what the last turn cost, and how long it ran' },
 ]
 
 // 0 is off; 1 to 4 is which line it sits on. Four lines is the cap.
@@ -238,6 +242,8 @@ const DEFAULT_LAYOUT: Layout = {
   output: 0,
   cache: 2,
   cost: 0,
+  speed: 0,
+  turn: 0,
 }
 let layout: Layout = { ...DEFAULT_LAYOUT }
 
@@ -296,6 +302,16 @@ const countdown = (resetsAt: number, now: number) => {
   if (d > 0) return `${d}d${String(h).padStart(2, '0')}h`
 
   return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
+}
+
+// A turn's length as `38s`, `2m05s`, `1h02m`.
+const elapsed = (ms: number) => {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`
+
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
 }
 
 // `Oct 6 11:00pm`, in the terminal's own time zone. Local getters rather than
@@ -368,6 +384,18 @@ let effortOverride: Effort | null = null
 // that goes wrong silently the day the prices change.
 let tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 let costUsd: number | null = null
+
+// The main loop's last request in output tokens a second, timed from its first
+// chunk to its stop so the wait for the first token is left out; a request too
+// short to time is not scored. And the last finished turn: the session total
+// at its end less the total at its start -- the one money figure a mod gets --
+// with the engine's own length. Both johnnyvizz's, from session-band (see
+// ACKNOWLEDGEMENTS.md).
+let speed: number | null = null
+const SPEED_MIN_TOKENS = 20
+const SPEED_MIN_MS = 1_000
+let turnCostAtStart: number | null = null
+let lastTurn: { usd: number | null; ms: number } | null = null
 
 // The prompt cache lives an hour from the last request that touched it, and a
 // request after that re-reads the whole transcript at the uncached price. The
@@ -1270,6 +1298,19 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
     return [{ fg: FG, text: `$ ${costUsd.toFixed(2)}` }]
   }
 
+  if (key === 'speed') {
+    if (speed === null) return []
+
+    return [{ fg: FG, text: `${speed} tok/s` }]
+  }
+
+  if (key === 'turn') {
+    if (lastTurn === null) return []
+    const cost = lastTurn.usd === null ? '' : `$ ${lastTurn.usd.toFixed(2)} `
+
+    return [{ fg: FG, text: `turn ${cost}${elapsed(lastTurn.ms)}` }]
+  }
+
   // Everything left is a rate-limit window, and there may be several of a kind.
   return ctx.windows
     .filter(w => itemForWindow(w) === key)
@@ -1535,12 +1576,52 @@ export const register: Register = on => {
       cacheWarmAt = await $.clock.now()
       coldAskedAt = null
     }
-    const result =
-      effortOverride !== null && effortOverride !== e.effort
-        ? yield* next({ ...e, effort: effortOverride })
-        : yield* next(e)
+    const stream = effortOverride !== null && effortOverride !== e.effort ? next({ ...e, effort: effortOverride }) : next(e)
+    let firstAt: number | null = null
+    for await (const chunk of stream) {
+      if (e.agentId === undefined) {
+        if (firstAt === null) firstAt = await $.clock.now()
+        if (chunk.kind === 'stop' && chunk.usage !== null) {
+          const ms = (await $.clock.now()) - firstAt
+          const out = chunk.usage.output_tokens
+          if (out >= SPEED_MIN_TOKENS && ms >= SPEED_MIN_MS) speed = Math.round((out / ms) * 1000)
+        }
+      }
+      yield chunk
+    }
+    const result = await stream.result
     if (e.agentId === undefined) {
       cacheWarmAt = await $.clock.now()
+      $.ui.invalidate('ui.render')
+    }
+
+    return result
+  })
+
+  // A turn's cost is the difference of two session totals, read fresh at each
+  // end; a reading that fails leaves the cost off the cell and keeps the
+  // length. A subagent's turn is not the one you asked for.
+  on('turn.start', async ($, e, next) => {
+    try {
+      turnCostAtStart = (await $.session.usage()).cost?.usd ?? null
+    } catch {
+      turnCostAtStart = null
+    }
+
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) {
+      let usd: number | null = null
+      try {
+        const total = (await $.session.usage()).cost?.usd
+        if (typeof total === 'number' && turnCostAtStart !== null) usd = Math.max(0, total - turnCostAtStart)
+      } catch {
+        // the length still stands
+      }
+      lastTurn = { usd, ms: e.durationMs }
       $.ui.invalidate('ui.render')
     }
 
@@ -1631,6 +1712,7 @@ export const register: Register = on => {
         `project version: ${projectVersion ?? 'none found'} -- ${versionNote}`,
         `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
         `cache: ${cacheWarmAt === null ? 'no request seen yet' : `warm at ${new Date(cacheWarmAt).toISOString()}, ${countdown(cacheWarmAt + CACHE_TTL_MS, now)} left`}`,
+        `speed: ${speed === null ? 'not timed yet' : `${speed} tok/s`}; last turn: ${lastTurn === null ? 'none' : `${lastTurn.usd === null ? 'cost unknown' : `$${lastTurn.usd.toFixed(2)}`}, ${elapsed(lastTurn.ms)}`}`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `guard: ${guardOn ? 'on' : 'off'}${held === null ? '' : `, holding ${held.risk.label}`}`,
         `cold gate: ${coldGateOn ? 'on' : 'off'}${coldAskedAt === null ? '' : `, asked at ${new Date(coldAskedAt).toISOString()}`}`,

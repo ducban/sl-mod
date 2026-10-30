@@ -423,6 +423,24 @@ A lifetime total -- spend and tokens across every session, not just this one --
 is out of reach entirely. It needs either the transcript scan this mod exists to
 avoid, or `ccuc`, which is not on every machine.
 
+### speed and turn
+
+Two cells off by default, `s` and `n` in `/sl-settings` turn them on:
+
+```
+ ct ▰▰▰▰▱ 66%   cache ▰▰▰▰▰ 1h00m   84 tok/s   turn $ 0.25 38s
+```
+
+`speed` is the main loop's last request in output tokens a second, timed from
+its first chunk to its stop, so the wait for the first token is left out and a
+slow start does not read as a slow model. A request under 20 tokens or under a
+second is not scored. `turn` is the last finished turn: its cost is the session
+total at the end less the total at the start, since the engine hands a mod one
+money figure and no split, and its length is the engine's own `durationMs`. A
+subagent's requests and turns touch neither. Both are johnnyvizz's, from
+[session-band](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/session-band),
+written again here.
+
 ### version
 
 `⌂ 0.1.2` is the **open project's** version, not the engine's, read in this

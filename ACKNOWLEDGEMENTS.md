@@ -41,6 +41,9 @@ someone else's repo and written again here.
   under which the gate stays quiet, and letting a slash command and a prompt
   nobody typed through: Karan Bansal, cache-tax `hooks/register.ts`, MIT.
   Written again here without its price table, in tokens (sl-mod 0.1.12)
+- Output tokens a second, timed from a request's first chunk to its stop, and
+  a turn's cost as the session total at its end less the total at its start:
+  johnnyvizz, session-band `hooks/register.tsx`, MIT (sl-mod 0.1.14)
 
 ## This file
 

@@ -611,6 +611,73 @@ test('the cache cell counts the hour down from the last request, and says cold o
   await ui.unmount()
 })
 
+// --- speed and the last turn --------------------------------------------------
+test('the speed cell times the last request, and the turn cell prices the last turn', async ($, on) => {
+  // The stand-in request yields a chunk, moves the clock two seconds, and
+  // stops with two hundred output tokens: a hundred a second. The session total
+  // is read at each end of the turn, so the turn costs their difference.
+  let usd = 1
+  const clock = stand(
+    on,
+    undefined,
+    () => ({ startedAt: 0, context: { tokens: 660000, window: 1000000, percent: 66 }, rateLimits: [], cost: { usd } }),
+    true,
+    undefined,
+    { ...FRESH_STORE, layout: { speed: 2, turn: 2 } },
+  )
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  let outputTokens = 200
+  on('turn.step', async function* () {
+    yield { kind: 'text' as const, index: 0, text: 'hello' }
+    if (outputTokens >= 20) await clock.advance(2_000)
+    const usage = { model: 'claude-opus-5', input_tokens: 10, output_tokens: outputTokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage }
+
+    return { turnId: 't', index: 0, answer: 'hello', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async (agentId?: string) => {
+    const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5', messageCount: 2, ...(agentId === undefined ? {} : { agentId }) })
+    for await (const _ of stream) {
+      // the chunks pass through the mod's hook
+    }
+    await stream.result
+  }
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /tok\/s/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /turn/ })).toBeUndefined()
+
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await step()
+  expect(await ui.find({ type: 'Text', text: /100 tok\/s/ })).toBeDefined()
+
+  // A subagent's request is not timed; a request too short to time is not scored.
+  outputTokens = 500
+  await step('agent-1')
+  expect(await ui.find({ type: 'Text', text: /100 tok\/s/ })).toBeDefined()
+  outputTokens = 5
+  await step()
+  expect(await ui.find({ type: 'Text', text: /100 tok\/s/ })).toBeDefined()
+
+  // The turn ends 25 cents and 38 seconds later.
+  usd = 1.25
+  await $.turn.complete({ answer: 'hello', durationMs: 38_000, isAborted: false, turnId: 't', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /turn \$ 0\.25 38s/ })).toBeDefined()
+
+  // A subagent's turn leaves it alone.
+  await $.turn.complete({ answer: '', durationMs: 5_000, isAborted: false, turnId: 't2', agentId: 'agent-1', reason: 'answer' })
+  expect(await ui.find({ type: 'Text', text: /turn \$ 0\.25 38s/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
 // --- the cold gate -----------------------------------------------------------
 // The world beneath the gate: the request stand-in the cache test uses, and a
 // prompt bottom that records what entered.
