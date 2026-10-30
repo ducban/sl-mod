@@ -215,7 +215,7 @@ const ITEMS: { key: ItemKey; hotkey: string; name: string; about: string }[] = [
   { key: 'other', hotkey: 'x', name: 'other', about: 'any other window, under its own name' },
   { key: 'input', hotkey: 'i', name: 'input', about: 'uncached input tokens this session' },
   { key: 'output', hotkey: 'o', name: 'output', about: 'output tokens this session' },
-  { key: 'cache', hotkey: 'h', name: 'cache', about: 'cache hit rate -- drawn only under 70%' },
+  { key: 'cache', hotkey: 'h', name: 'cache', about: 'the hour left on the prompt cache, and the hit rate once it is low' },
   { key: 'cost', hotkey: 'u', name: 'cost', about: 'what this session has cost, in USD' },
 ]
 
@@ -357,6 +357,21 @@ let effortOverride: Effort | null = null
 // that goes wrong silently the day the prices change.
 let tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 let costUsd: number | null = null
+
+// The prompt cache lives an hour from the last request that touched it, and a
+// request after that re-reads the whole transcript at the uncached price. The
+// cell counts that hour down from the main loop's last request -- `turn.step`
+// is where a request is seen -- and says `cold` once it has gone. Green, amber
+// inside twenty minutes, red inside ten: here the colours are the gauge's,
+// because running out IS the trouble. The countdown is johnnyvizz's, from
+// session-band; the hour from the last request is Karan Bansal's, from
+// cache-tax (see ACKNOWLEDGEMENTS.md). A session in usage overage drops to a
+// five-minute cache, which nothing tells a mod; the cell then reads warm for
+// longer than it is.
+const CACHE_TTL_MS = 60 * 60_000
+const CACHE_AMBER_MS = 20 * 60_000
+const CACHE_RED_MS = 10 * 60_000
+let cacheWarmAt: number | null = null
 
 // Cache hit is a number that reads 98-100% nearly always, and when it drops the
 // money is already spent. So it is not drawn until it is worth acting on.
@@ -775,7 +790,7 @@ async function toggleReset($: EngineInterface) {
 // what turns the week's cell over. A redraw is a function call; while the
 // countdown is off there is nothing to move.
 function tickCountdown($: EngineInterface) {
-  if (showReset) $.ui.invalidate('ui.render')
+  if (showReset || (layout.cache > 0 && cacheWarmAt !== null)) $.ui.invalidate('ui.render')
 }
 
 // --- A compaction nothing told the band about --------------------------------
@@ -940,12 +955,31 @@ function partsFor(key: ItemKey, ctx: Ctx): Part[] {
   }
 
   if (key === 'cache') {
+    const parts: Part[] = []
+    // Nothing until the first request: before it there is no cache to time.
+    if (cacheWarmAt !== null) {
+      const expiresAt = cacheWarmAt + CACHE_TTL_MS
+      const left = expiresAt - ctx.now
+      if (left <= 0) {
+        parts.push({ fg: RED, text: 'cache cold' })
+      } else {
+        // The bar drains: five segments of the hour left, rounded up like the
+        // quotas, so a minute left still shows one.
+        const fg = left <= CACHE_RED_MS ? RED : left <= CACHE_AMBER_MS ? AMBER : GREEN
+        const time = countdown(expiresAt, ctx.now)
+        parts.push({
+          fg,
+          text: ctx.compact ? `cache ${time}` : `cache ${bar((left / CACHE_TTL_MS) * 100)} ${time}`,
+        })
+      }
+    }
     const hit = cacheHit()
-    // Silent while it is healthy. A permanent cell for a number that reads 99%
-    // is spent width, and the drop is the only moment it says anything.
-    if (hit === null || hit >= CACHE_ALERT_BELOW) return []
+    // The hit rate stays silent while it is healthy. A permanent cell for a
+    // number that reads 99% is spent width, and the drop is the only moment it
+    // says anything.
+    if (hit !== null && hit < CACHE_ALERT_BELOW) parts.push({ fg: RED, text: `ch ${hit}%` })
 
-    return [{ fg: RED, text: `ch ${hit}%` }]
+    return parts
   }
 
   if (key === 'cost') {
@@ -1205,13 +1239,20 @@ export const register: Register = on => {
         }
       }
       mainMessages = e.messageCount
+      // The cache's hour runs from the request; the response's end is the
+      // later, safer mark, and the cell takes it below.
+      cacheWarmAt = await $.clock.now()
     }
-    if (effortOverride !== null && effortOverride !== e.effort) {
-      yield* next({ ...e, effort: effortOverride })
+    const result =
+      effortOverride !== null && effortOverride !== e.effort
+        ? yield* next({ ...e, effort: effortOverride })
+        : yield* next(e)
+    if (e.agentId === undefined) {
+      cacheWarmAt = await $.clock.now()
+      $.ui.invalidate('ui.render')
+    }
 
-      return
-    }
-    yield* next(e)
+    return result
   })
 
   // The second source for effort, and the one that actually answers. `turn.step`
@@ -1297,6 +1338,7 @@ export const register: Register = on => {
         `git: branch=${branch} dirty=${isDirty} ahead=${isAhead} -- ${gitNote}`,
         `project version: ${projectVersion ?? 'none found'} -- ${versionNote}`,
         `tokens: ${JSON.stringify(tokens)} cacheHit=${cacheHit() ?? 'n/a'}%`,
+        `cache: ${cacheWarmAt === null ? 'no request seen yet' : `warm at ${new Date(cacheWarmAt).toISOString()}, ${countdown(cacheWarmAt + CACHE_TTL_MS, now)} left`}`,
         `layout: ${ITEMS.map(i => `${i.name}=${layout[i.key] || 'off'}`).join(' ')}`,
         `usage endpoint: ${reading.windows.length} window(s)`,
         ...reading.windows.map(w => `  ${w.kind}${w.scope ? ` (${w.scope})` : ''} ${w.percentUsed}%`),
@@ -1519,7 +1561,8 @@ export const register: Register = on => {
         line(`${bar(30)}  21-40%`, 'so 19% shows one segment, never none'),
         line(`${bar(90)}  81-100%`, 'a quota must not read lower than it is'),
         line('colour', 'green under 60%, amber from 60, red from 85'),
-        line('ch', `cache hit, drawn only under ${CACHE_ALERT_BELOW}% -- above that it has nothing to say`),
+        line('cache', 'the hour left on the prompt cache, from the last request: amber inside 20m, red inside 10m, `cold` once gone'),
+        line('ch', `cache hit, joins the cell only under ${CACHE_ALERT_BELOW}% -- above that it has nothing to say`),
         gap,
         Text({ color: BLUE, bold: true, children: ['Row one'] }),
         line(`${ICON.clean} ${ICON.dirty} ${ICON.ahead}`, 'clean, uncommitted changes, ahead of upstream'),

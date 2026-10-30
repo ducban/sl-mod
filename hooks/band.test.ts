@@ -533,6 +533,68 @@ test('the cache cell says nothing while the cache is healthy', async ($, on) => 
   await ui.unmount()
 })
 
+test('the cache cell counts the hour down from the last request, and says cold once it is gone', async ($, on) => {
+  // The prompt cache lives an hour from the last request. Before the first
+  // request there is nothing to time, so the cell is empty; after one it
+  // counts down, and a request inside the hour starts it again. A subagent's
+  // request is not the main transcript's cache and must not restart it.
+  // A fresh shared reading in the store, so the usage poll never reaches the
+  // network; `session.start` is where the minute tick is set.
+  const clock = stand(on, undefined, undefined, true, undefined, {
+    usage: { windows: [{ kind: 'five_hour', percentUsed: 8 }], fetchedAt: 0, nextAllowedAt: 0 },
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.step', async function* () {
+    return { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  const step = async (messageCount: number, agentId?: string) => {
+    const stream = $.turn.step({
+      turnId: 't',
+      index: 0,
+      model: 'claude-opus-5',
+      messageCount,
+      ...(agentId === undefined ? {} : { agentId }),
+    })
+    for await (const _ of stream) {
+      // nothing streams from the stand-in
+    }
+    await stream.result
+  }
+
+  await $.session.start({
+    cwd: '/home/bannd/Workspace/Projects/personal_works/sl-mod',
+    surface: 'terminal',
+    isInteractive: true,
+  })
+  const ui = await $.ui.mount({ plugin: 'sl-mod', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /cache/ })).toBeUndefined()
+
+  // The first request: a full hour, five segments.
+  await step(2)
+  expect(await ui.find({ type: 'Text', text: /cache ▰▰▰▰▰ 1h00m/ })).toBeDefined()
+
+  // Forty-five minutes on, the tick has brought it to fifteen: a quarter of
+  // the hour, two segments rounded up.
+  await clock.advance(45 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /cache ▰▰▱▱▱ 15m/ })).toBeDefined()
+
+  // A subagent's request does not restart the hour.
+  await step(3, 'agent-1')
+  expect(await ui.find({ type: 'Text', text: /cache ▰▰▱▱▱ 15m/ })).toBeDefined()
+
+  // The hour runs out.
+  await clock.advance(16 * 60_000)
+  expect(await ui.find({ type: 'Text', text: /cache cold/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\d+m/ })).toBeUndefined()
+
+  // The next request warms it again.
+  await step(4)
+  expect(await ui.find({ type: 'Text', text: /cache ▰▰▰▰▰ 1h00m/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /cold/ })).toBeUndefined()
+
+  await ui.unmount()
+})
+
 test('a repo with no version does not take the git cell down with it', async ($, on) => {
   // The version probe used to run `git describe` unguarded, between the git
   // refresh and the timers, inside a GATING hook -- `claude plugin validate`

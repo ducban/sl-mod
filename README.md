@@ -265,15 +265,40 @@ Two rules the pane obeys:
   reading this repo keeps finding elsewhere.
 - A line with nothing on it is dropped, not left as a gap.
 
-### cache hit
+### cache
 
-`ch` is drawn only under **70%**. Above that it reads 98–100% and says nothing,
-and a permanent cell for a constant is spent width. It is also the one figure
-here that reports the past: by the time it drops, the money is gone.
+The prompt cache lives an hour from the last request that touched it, and the
+first request after that hour re-reads the whole transcript at the uncached
+price — on a 330k-token session that is a few dollars for a two-line recap. So
+the `cache` cell counts the hour down from the main loop's last request, which
+`turn.step` sees go out and come back:
 
-It is summed over the session rather than read off the last response, which
-needs a dedup signal — `session.measure` naming `cost` in `changed`, the
-engine's own word for "a priced response landed".
+```
+ cache ▰▰▰▰▰ 1h00m     just sent
+ cache ▰▰▱▱▱ 15m       amber inside twenty minutes
+ cache ▰▱▱▱▱ 4m        red inside ten
+ cache cold            the hour has gone; the next request pays to re-warm
+```
+
+The bar drains, five segments of the hour left, rounded up like the quotas. The
+colours here are the gauge's own — green, amber, red — because running out *is*
+the trouble, unlike a reset, which is only a date. A subagent's requests do not
+restart it: they are not the main transcript's cache. Nothing is drawn before
+the first request, since there is no cache to time yet. On a narrow line the bar
+drops and `cache 15m` stays. The countdown is johnnyvizz's idea, from
+[session-band](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/session-band);
+timing the hour from the last request is Karan Bansal's, from cache-tax.
+
+One thing the cell cannot know: a session in usage overage drops to a
+five-minute cache, and nothing tells a mod. The cell then reads warm for longer
+than it is.
+
+`ch` — the hit rate — joins the same cell only under **70%**. Above that it
+reads 98–100% and says nothing, and a permanent cell for a constant is spent
+width. It is also the one figure here that reports the past: by the time it
+drops, the money is gone. It is summed over the session rather than read off the
+last response, which needs a dedup signal — `session.measure` naming `cost` in
+`changed`, the engine's own word for "a priced response landed".
 
 ### input and output are tokens, not dollars
 

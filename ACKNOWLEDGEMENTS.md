@@ -21,6 +21,12 @@ someone else's repo and written again here.
   Karan Bansal ([@karanb192](https://github.com/karanb192)),
   [cache-tax](https://github.com/karanb192/cache-tax) `hooks/register.ts`, MIT
   (sl-mod 0.1.9)
+- The prompt cache's hour counted down in the band, with amber and red steps as
+  it runs out: johnnyvizz ([@JohnnyVizz](https://github.com/JohnnyVizz)),
+  [session-band](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/session-band)
+  `hooks/register.tsx`, MIT (sl-mod 0.1.10)
+- The hour measured from the last request, and `cold` as the word for a cache
+  that has gone: Karan Bansal, cache-tax, MIT (sl-mod 0.1.10)
 
 ## This file
 
